@@ -4,8 +4,9 @@ This file is thin on purpose. It only translates HTTP <-> Python calls;
 all the real logic lives in agents/, runner.py, worktree.py, checks.py and db.py.
 
 Endpoints
-  GET  /api/agents                     list agents and their status (cheap)
+  GET  /api/agents?refresh=false       agents, their models and account info (cached)
   POST /api/agents/{id}/test           send a tiny prompt to check sign-in
+  POST /api/agents/{id}/models/unhide  show models hidden after a "needs credits" failure
   GET  /api/runs                       recent runs
   POST /api/runs                       start a run
   GET  /api/runs/{id}                  one run
@@ -81,17 +82,31 @@ async def _call(coro):
 # ---------- agents ----------
 
 @app.get("/api/agents", response_model=list[AgentStatus])
-async def list_agents():
-    return await app.state.registry.scan()
+async def list_agents(refresh: bool = False):
+    """refresh=true asks each CLI again for its models and account info (slower)."""
+    return await app.state.registry.scan(refresh, app.state.db.hidden_models())
 
 
 @app.post("/api/agents/{agent_id}/test", response_model=AgentStatus)
 async def test_agent(agent_id: str):
+    registry = app.state.registry
     try:
-        adapter = app.state.registry.get(agent_id)
+        adapter = registry.get(agent_id)
     except KeyError as exc:
         raise HTTPException(404, exc.args[0]) from None
-    return await adapter.test_connection()
+    registry.remember_test(await adapter.test_connection())
+    return await registry.status_of(agent_id, hidden=app.state.db.hidden_models().get(agent_id, set()))
+
+
+@app.post("/api/agents/{agent_id}/models/unhide", response_model=AgentStatus)
+async def unhide_models(agent_id: str):
+    """Show models again that were hidden after a 'needs credits' failure."""
+    try:
+        app.state.registry.get(agent_id)
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from None
+    app.state.db.unhide_models(agent_id)
+    return await app.state.registry.status_of(agent_id, hidden=set())
 
 
 # ---------- runs ----------
@@ -116,7 +131,7 @@ async def get_run(run_id: str):
 
 @app.post("/api/runs/{run_id}/messages", response_model=RunInfo)
 async def follow_up(run_id: str, body: FollowUp):
-    return await _call(runs().follow_up(run_id, body.prompt))
+    return await _call(runs().follow_up(run_id, body.prompt, body.model, body.effort))
 
 
 @app.post("/api/runs/{run_id}/cancel")

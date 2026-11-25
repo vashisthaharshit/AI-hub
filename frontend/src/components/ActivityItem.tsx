@@ -19,7 +19,13 @@ export function ActivityItem({ item, runId, active }: Props) {
     case "user":
       return (
         <div className="ml-auto max-w-[85%] rounded-lg bg-sky-600/20 px-3 py-2 text-sm whitespace-pre-wrap">
-          {item.followUp && <p className="mb-0.5 text-[11px] text-sky-300">Follow-up</p>}
+          {(item.followUp || item.model) && (
+            <p className="mb-0.5 text-[11px] text-sky-300">
+              {[item.followUp && "Follow-up", item.model && `model: ${item.model}`, item.effort && `effort: ${item.effort}`]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
+          )}
           {item.text}
         </div>
       );

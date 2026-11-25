@@ -31,8 +31,9 @@ async function errorMessage(res: Response): Promise<string> {
 }
 
 export const api = {
-  agents: () => request<AgentStatus[]>("/api/agents"),
+  agents: (refresh = false) => request<AgentStatus[]>(`/api/agents${refresh ? "?refresh=true" : ""}`),
   testAgent: (id: string) => request<AgentStatus>(`/api/agents/${id}/test`, { method: "POST" }),
+  unhideModels: (id: string) => request<AgentStatus>(`/api/agents/${id}/models/unhide`, { method: "POST" }),
 
   runs: () => request<RunInfo[]>("/api/runs"),
   run: (id: string) => request<RunInfo>(`/api/runs/${id}`),
@@ -40,8 +41,8 @@ export const api = {
     request<RunInfo>("/api/runs", { method: "POST", body: JSON.stringify(body) }),
   files: (id: string) => request<ChangedFile[]>(`/api/runs/${id}/files`),
   cancel: (id: string) => request<{ cancelled: boolean }>(`/api/runs/${id}/cancel`, { method: "POST" }),
-  followUp: (id: string, prompt: string) =>
-    request<RunInfo>(`/api/runs/${id}/messages`, { method: "POST", body: JSON.stringify({ prompt }) }),
+  followUp: (id: string, prompt: string, model: string | null, effort: string | null) =>
+    request<RunInfo>(`/api/runs/${id}/messages`, { method: "POST", body: JSON.stringify({ prompt, model, effort }) }),
   keep: (id: string) => request<RunInfo>(`/api/runs/${id}/keep`, { method: "POST" }),
   discard: (id: string) => request<RunInfo>(`/api/runs/${id}/discard`, { method: "POST" }),
   decide: (id: string, approvalId: string, allow: boolean, message?: string) =>

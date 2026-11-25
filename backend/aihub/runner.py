@@ -20,6 +20,7 @@ on its own (the orchestrator in Phase 3 will use it directly).
 """
 
 import asyncio
+import re
 import secrets
 from collections import defaultdict
 from collections.abc import AsyncIterator
@@ -36,6 +37,14 @@ from aihub.models import (
 )
 
 _END = None  # marker put on a subscriber's queue when a turn finishes
+
+# Error text that means "this model needs usage credits the account doesn't have".
+# Only checked on failed turns, and only in error messages.
+_CREDITS = re.compile(r"\b(usage credits?|credit balance|out of credits|insufficient credits?|buy credits|requires? (usage )?credits)\b", re.I)
+
+
+def needs_credits(message: str) -> bool:
+    return bool(_CREDITS.search(message or ""))
 
 
 class RunError(Exception):
@@ -72,6 +81,7 @@ class RunManager:
             id=run_id, agent_id=adapter.id, repo_path=str(repo), prompt=req.prompt,
             state="pending", created_at=now_iso(), base_commit=base,
             supervised=req.supervised, test_command=(req.test_command or "").strip() or None,
+            model=req.model or None, effort=req.effort or None,
         ))
         try:
             branch, path = await worktree.create_worktree(repo, run_id, base)
@@ -79,10 +89,12 @@ class RunManager:
             self.db.update_run(run_id, state="failed")
             raise
         self.db.update_run(run_id, branch=branch, worktree_path=str(path), state="running")
-        self._launch(run_id, adapter, req.prompt, path, resume=None)
+        self._launch(run_id, adapter, req.prompt, path, resume=None,
+                     model=req.model or None, effort=req.effort or None)
         return self.db.get_run(run_id)
 
-    async def follow_up(self, run_id: str, prompt: str) -> RunInfo:
+    async def follow_up(self, run_id: str, prompt: str, model: str | None = None,
+                        effort: str | None = None) -> RunInfo:
         """Send another message to a finished run: same agent session, same worktree."""
         run = self._require_idle(run_id)
         adapter = self.registry.get(run.agent_id)
@@ -90,8 +102,16 @@ class RunManager:
             raise RunError(f"{adapter.name} doesn't support follow-up messages.")
         if not run.session_id:
             raise RunError("This run has no agent session to continue.")
-        self.db.update_run(run_id, state="running")
-        self._launch(run_id, adapter, prompt, Path(run.worktree_path), resume=run.session_id)
+        # Not given = keep using the run's current model / effort. A new model
+        # without an effort resets effort to that model's default.
+        if model and model != run.model:
+            effort = effort or None
+        else:
+            effort = effort or run.effort
+        model = model or run.model
+        self.db.update_run(run_id, state="running", model=model, effort=effort)
+        self._launch(run_id, adapter, prompt, Path(run.worktree_path), resume=run.session_id,
+                     model=model, effort=effort)
         return self.db.get_run(run_id)
 
     def is_active(self, run_id: str) -> bool:
@@ -110,26 +130,34 @@ class RunManager:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _launch(self, run_id: str, adapter: AgentAdapter, prompt: str, path: Path, resume: str | None) -> None:
+    def _launch(self, run_id: str, adapter: AgentAdapter, prompt: str, path: Path,
+                resume: str | None, model: str | None, effort: str | None) -> None:
         self._next_seq[run_id] = self.db.last_seq(run_id) + 1  # continue numbering after earlier turns
-        self._tasks[run_id] = asyncio.create_task(self._execute(run_id, adapter, prompt, path, resume))
+        self._tasks[run_id] = asyncio.create_task(
+            self._execute(run_id, adapter, prompt, path, resume, model, effort))
 
     # ---------- one turn ----------
 
-    async def _execute(self, run_id: str, adapter: AgentAdapter, prompt: str, path: Path, resume: str | None) -> None:
+    async def _execute(self, run_id: str, adapter: AgentAdapter, prompt: str, path: Path,
+                       resume: str | None, model: str | None, effort: str | None) -> None:
         run = self.db.get_run(run_id)
-        options = RunOptions(resume_session_id=resume)
+        options = RunOptions(resume_session_id=resume, model=model, effort=effort)
         if run.supervised:
             token = secrets.token_urlsafe(24)
             self._tokens[run_id] = token
             options.approval_env = {"AIHUB_URL": config.base_url(), "AIHUB_RUN_ID": run_id, "AIHUB_TOKEN": token}
 
-        self._record(run_id, AgentEvent(kind="user_message", data={"text": prompt, "follow_up": resume is not None}))
+        self._record(run_id, AgentEvent(kind="user_message", data={
+            "text": prompt, "follow_up": resume is not None, "model": model, "effort": effort,
+        }))
         state = "failed"
         result: RunResult | None = None
+        errors: list[str] = []
         try:
             async for event in adapter.run(prompt, path, options):
                 self._record(run_id, event)
+                if event.kind == "error":
+                    errors.append(str(event.data.get("message", "")))
                 if event.kind == "session_started" and event.data.get("session_id"):
                     self.db.update_run(run_id, session_id=event.data["session_id"])
                 elif event.kind == "result":
@@ -144,6 +172,15 @@ class RunManager:
         finally:
             self._tokens.pop(run_id, None)
             self._deny_pending(run_id, "The run ended.")
+            if state == "failed" and model:
+                failed_summary = result.summary if result and not result.success and result.summary else ""
+                failure = " ".join([*errors, failed_summary])
+                if needs_credits(failure):
+                    self.db.hide_model(adapter.id, model, "needs credits")
+                    self._record(run_id, AgentEvent(kind="error", data={
+                        "message": f"'{model}' seems to need usage credits on this account. "
+                                   "It's now hidden from the model list (Agents panel → show hidden models).",
+                    }))
             metrics = None
             if state != "cancelled":
                 try:

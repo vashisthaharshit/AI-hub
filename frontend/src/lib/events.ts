@@ -25,7 +25,7 @@ export interface ApprovalItem {
 }
 
 export type Item =
-  | { type: "user"; seq: number; text: string; followUp: boolean }
+  | { type: "user"; seq: number; text: string; followUp: boolean; model: string | null; effort: string | null }
   | { type: "session"; seq: number; model: string | null }
   | ApprovalItem
   | { type: "checks"; seq: number; metrics: RunMetrics }
@@ -44,7 +44,14 @@ export function groupEvents(events: EventMessage[]): Item[] {
     const d = e.data;
     switch (e.kind) {
       case "user_message":
-        items.push({ type: "user", seq: e.seq, text: String(d.text ?? ""), followUp: Boolean(d.follow_up) });
+        items.push({
+          type: "user",
+          seq: e.seq,
+          text: String(d.text ?? ""),
+          followUp: Boolean(d.follow_up),
+          model: (d.model as string) ?? null,
+          effort: (d.effort as string) ?? null,
+        });
         break;
       case "approval_request": {
         const approval: ApprovalItem = {

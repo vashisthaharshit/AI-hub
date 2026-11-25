@@ -114,3 +114,10 @@ def test_mcp_config_points_at_our_bridge(tmp_path, monkeypatch):
     assert server["command"] == sys.executable
     assert server["args"] == ["-m", "aihub.approval_mcp"]
     assert server["env"] == {"AIHUB_RUN_ID": "r1"}
+
+
+def test_command_model():
+    cmd = ClaudeCodeAdapter().build_command("claude", RunOptions(resume_session_id="abc", model="sonnet"))
+    assert cmd[cmd.index("--model") + 1] == "sonnet"
+    assert "--model" not in ClaudeCodeAdapter().build_command("claude", RunOptions())
+    assert [m.id for m in ClaudeCodeAdapter().models] == ["opus", "sonnet", "haiku"]

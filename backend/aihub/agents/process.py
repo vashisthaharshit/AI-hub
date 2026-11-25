@@ -6,6 +6,7 @@ Only the meaning of each line differs, and that stays in each adapter.
 """
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
@@ -106,3 +107,65 @@ def status_from_test(status: AgentStatus, events: list[AgentEvent], login_hint: 
     if looks_like_auth_error(message):
         return status.model_copy(update={"state": "not_signed_in", "help": f"Not signed in. Run: {login_hint}  ({message[:200]})"})
     return status.model_copy(update={"state": "error", "help": message[:300] or "Test prompt failed."})
+
+
+class JsonLineProcess:
+    """A two-way conversation with a CLI over JSON lines (stdin -> stdout).
+
+    Used for short "ask and answer" exchanges, like asking Claude Code or
+    Codex which models the account has. Example:
+
+        async with JsonLineProcess([path, "app-server"]) as p:
+            await p.send({"id": 1, "method": "model/list", "params": {}})
+            reply = await p.wait_for(lambda m: m.get("id") == 1)
+    """
+
+    def __init__(self, cmd: list[str], timeout: float = 40):
+        self.cmd = cmd
+        self.timeout = timeout
+        self.proc: asyncio.subprocess.Process | None = None
+        self.seen: list[dict] = []  # every message read, useful when debugging
+
+    async def __aenter__(self) -> "JsonLineProcess":
+        self.proc = await asyncio.create_subprocess_exec(
+            *self.cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,  # not read, so it must not be a pipe (deadlock)
+            limit=STREAM_LIMIT,
+        )
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        if self.proc and self.proc.returncode is None:
+            try:
+                self.proc.stdin.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await asyncio.wait_for(self.proc.wait(), 3)
+            except asyncio.TimeoutError:
+                self.proc.kill()
+                await self.proc.wait()
+
+    async def send(self, message: dict) -> None:
+        self.proc.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+        await self.proc.stdin.drain()
+
+    async def wait_for(self, match) -> dict:
+        """Read lines until `match(message)` is true. Raises TimeoutError or RuntimeError."""
+        async def read():
+            while True:
+                raw = await self.proc.stdout.readline()
+                if not raw:
+                    raise RuntimeError("the program exited before answering")
+                try:
+                    message = json.loads(raw.decode("utf-8", errors="replace"))
+                except json.JSONDecodeError:
+                    continue  # not JSON (log noise): skip
+                if not isinstance(message, dict):
+                    continue
+                self.seen.append(message)
+                if match(message):
+                    return message
+        return await asyncio.wait_for(read(), self.timeout)

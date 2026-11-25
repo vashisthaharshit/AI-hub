@@ -280,3 +280,80 @@ def test_old_database_is_migrated(tmp_path):
     conn.close()
     run = Database(path).get_run("r1")
     assert run.prompt == "old task" and run.supervised is False and run.outcome is None
+
+
+def test_model_is_passed_and_can_switch(repo, tmp_path):
+    async def scenario():
+        adapter = FakeAdapter()
+        runs = make_manager(tmp_path, adapter)
+        info = await runs.start(RunCreate(agent_id="fake", repo_path=str(repo), prompt="a", model="opus"))
+        await wait_turn(runs, info.id)
+        assert adapter.calls[0][1].model == "opus"
+
+        # Follow-up without a model keeps the current one...
+        await runs.follow_up(info.id, "b")
+        await wait_turn(runs, info.id, after=runs.db.last_seq(info.id))
+        assert adapter.calls[1][1].model == "opus"
+
+        # ...and with a model, switches for this turn and the ones after it.
+        await runs.follow_up(info.id, "c", model="sonnet")
+        await wait_turn(runs, info.id, after=runs.db.last_seq(info.id))
+        assert adapter.calls[2][1].model == "sonnet"
+        assert runs.db.get_run(info.id).model == "sonnet"
+
+        # Each user message records the model it was sent with.
+        models = [ev.data["model"] for _, ev in runs.db.events(info.id) if ev.kind == "user_message"]
+        assert models == ["opus", "opus", "sonnet"]
+
+    asyncio.run(scenario())
+
+
+def test_effort_is_passed_and_resets_on_model_switch(repo, tmp_path):
+    async def scenario():
+        adapter = FakeAdapter()
+        runs = make_manager(tmp_path, adapter)
+        info = await runs.start(RunCreate(agent_id="fake", repo_path=str(repo), prompt="a", model="opus", effort="high"))
+        await wait_turn(runs, info.id)
+        assert (adapter.calls[0][1].model, adapter.calls[0][1].effort) == ("opus", "high")
+
+        await runs.follow_up(info.id, "b")                       # same model: effort kept
+        await wait_turn(runs, info.id, after=runs.db.last_seq(info.id))
+        assert adapter.calls[1][1].effort == "high"
+
+        await runs.follow_up(info.id, "c", model="sonnet")      # new model: back to its default
+        await wait_turn(runs, info.id, after=runs.db.last_seq(info.id))
+        assert (adapter.calls[2][1].model, adapter.calls[2][1].effort) == ("sonnet", None)
+
+        await runs.follow_up(info.id, "d", effort="low")        # only effort changed
+        await wait_turn(runs, info.id, after=runs.db.last_seq(info.id))
+        assert (adapter.calls[3][1].model, adapter.calls[3][1].effort) == ("sonnet", "low")
+        assert runs.db.get_run(info.id).effort == "low"
+
+    asyncio.run(scenario())
+
+
+class CreditsAdapter(FakeAdapter):
+    async def run(self, prompt, workdir, options=None):
+        self.calls.append((prompt, options))
+        yield AgentEvent(kind="error", data={"message": "Fable 5.2 requires usage credits. Buy credits to continue."})
+        yield AgentEvent(kind="result", data=RunResult(success=False).model_dump())
+
+
+def test_model_needing_credits_gets_hidden(repo, tmp_path):
+    async def scenario():
+        runs = make_manager(tmp_path, CreditsAdapter())
+        info = await runs.start(RunCreate(agent_id="fake", repo_path=str(repo), prompt="x", model="fable"))
+        await wait_turn(runs, info.id)
+        assert runs.db.get_run(info.id).state == "failed"
+        assert runs.db.hidden_models() == {"fake": {"fable"}}
+        assert "hidden from the model list" in runs.db.events(info.id)[-2][1].data["message"]
+
+        runs.db.unhide_models("fake")
+        assert runs.db.hidden_models() == {}
+
+        # A failure for another reason doesn't hide anything.
+        info2 = await runs.start(RunCreate(agent_id="fake", repo_path=str(repo), prompt="y"))  # no model chosen
+        await wait_turn(runs, info2.id)
+        assert runs.db.hidden_models() == {}
+
+    asyncio.run(scenario())

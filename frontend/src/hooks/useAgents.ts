@@ -11,11 +11,13 @@ export function useAgents() {
   const [error, setError] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  // force=true makes the backend ask each CLI again for its models and account
+  // info ("Re-check"); otherwise the cached answer comes back quickly.
+  const refresh = useCallback(async (force = false) => {
     setLoading(true);
     setError(null);
     try {
-      setAgents(await api.agents());
+      setAgents(await api.agents(force));
     } catch (e) {
       setError(`Can't reach the AI-Hub backend: ${errorText(e)}`);
     } finally {
@@ -36,11 +38,20 @@ export function useAgents() {
     }
   }, []);
 
+  const unhide = useCallback(async (id: string) => {
+    try {
+      const updated = await api.unhideModels(id);
+      setAgents((list) => list.map((a) => (a.id === id ? updated : a)));
+    } catch (e) {
+      setError(errorText(e));
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
-  return { agents, loading, error, testingId, refresh, test };
+  return { agents, loading, error, testingId, refresh, test, unhide };
 }
 
 /** Agents a task can be sent to. "installed" isn't verified yet but will usually work. */

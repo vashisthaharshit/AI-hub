@@ -20,7 +20,5 @@ dist/
 .DS_Store
 Thumbs.db
 
-Claude outputs/
-
-
-README.md
+# Local probe results (may contain account info)
+backend/scripts/probe_output.json

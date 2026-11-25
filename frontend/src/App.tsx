@@ -27,8 +27,9 @@ export default function App() {
           loading={agents.loading}
           error={agents.error}
           testingId={agents.testingId}
-          onRefresh={agents.refresh}
+          onRefresh={() => agents.refresh(true)}
           onTest={agents.test}
+          onUnhide={agents.unhide}
         />
         <RunList
           selectedId={selectedRunId}

@@ -28,8 +28,10 @@ from pathlib import Path
 from typing import Any
 
 from aihub.agents.base import AgentAdapter, RunOptions
-from aihub.agents.process import ProcessFailed, run_quick, status_from_test, stream_lines
-from aihub.models import AgentEvent, AgentStatus, RunResult
+from datetime import datetime, timezone
+
+from aihub.agents.process import JsonLineProcess, ProcessFailed, run_quick, status_from_test, stream_lines
+from aihub.models import AccountInfo, AgentEvent, AgentStatus, Discovery, ModelOption, RunResult, UsageWindow
 
 MAX_TOOL_OUTPUT_CHARS = 20_000
 
@@ -40,6 +42,9 @@ class CodexAdapter(AgentAdapter):
     binary = "codex"
     supports_supervised = False
     supports_follow_up = True
+    # No fallback list: Codex model names change often. discover() asks the
+    # CLI; if that fails, only "Default model" is offered.
+    models: list[ModelOption] = []
 
     def _find(self) -> str | None:
         return shutil.which(self.binary)
@@ -65,6 +70,15 @@ class CodexAdapter(AgentAdapter):
             events = [e async for e in self.run("Reply with just the word OK.", Path(tmp))]
         return status_from_test(status, events, login_hint="codex login")
 
+    async def discover(self) -> Discovery:
+        path = self._find()
+        if not path:
+            return Discovery(models=self.models, error="Codex is not installed.")
+        try:
+            return await _discover(path)
+        except Exception as exc:  # noqa: BLE001 - fall back to "Default model" only
+            return Discovery(models=self.models, error=f"Couldn't read models from Codex: {exc}")
+
     def build_command(self, path: str, options: RunOptions) -> list[str]:
         cmd = [
             path, "exec",
@@ -72,6 +86,11 @@ class CodexAdapter(AgentAdapter):
             "--sandbox", "workspace-write",  # may edit files only inside the working folder
             "--skip-git-repo-check",         # our test-connection folder isn't a git repo
         ]
+        if options.model:
+            cmd += ["--model", options.model]
+        if options.effort:
+            # Config override: same as model_reasoning_effort in ~/.codex/config.toml
+            cmd += ["-c", f"model_reasoning_effort={options.effort}"]
         if options.resume_session_id:
             cmd += ["resume", options.resume_session_id]
         cmd.append("-")  # read the prompt from stdin
@@ -97,6 +116,118 @@ class CodexAdapter(AgentAdapter):
                     yield event
         except ProcessFailed as exc:
             yield AgentEvent(kind="error", data={"message": str(exc), "exit_code": exc.exit_code})
+
+
+# ---------- discovery: models + account (codex app-server) ----------
+
+async def _discover(path: str) -> Discovery:
+    """`codex app-server` speaks JSON-RPC over stdin/stdout. Its documented
+    methods give us the models (model/list), the account (account/read) and
+    usage limits + credits (account/rateLimits/read). No tokens are used."""
+    async with JsonLineProcess([path, "app-server"]) as p:
+        next_id = 0
+
+        async def call(method: str, params: dict | None = None) -> dict:
+            nonlocal next_id
+            next_id += 1
+            request_id = next_id
+            await p.send({"id": request_id, "method": method, "params": params or {}})
+            reply = await p.wait_for(lambda m: m.get("id") == request_id)
+            if "error" in reply:
+                raise RuntimeError(f"{method}: {reply['error']}")
+            return reply.get("result") or {}
+
+        await call("initialize", {"clientInfo": {"name": "aihub", "title": "AI-Hub", "version": "0.2.0"}})
+        await p.send({"method": "initialized"})
+
+        raw_models: list[dict] = []
+        cursor = None
+        for _ in range(10):  # follow pagination, with a safety limit
+            page = await call("model/list", {"cursor": cursor} if cursor else {})
+            raw_models += page.get("data") or []
+            cursor = page.get("nextCursor")
+            if not cursor:
+                break
+
+        account = rate_limits = {}
+        try:
+            account = await call("account/read")
+        except Exception:  # noqa: BLE001 - optional extras: models still work without them
+            pass
+        try:
+            rate_limits = await call("account/rateLimits/read")
+        except Exception:  # noqa: BLE001
+            pass
+    return parse_discovery(raw_models, account, rate_limits)
+
+
+def parse_discovery(raw_models: list[dict], account: dict, rate_limits: dict) -> Discovery:
+    models, default_label, default_model = [], None, None
+    for m in raw_models:
+        if not isinstance(m, dict) or m.get("hidden"):
+            continue
+        model_id = m.get("model") or m.get("id")
+        if not model_id:
+            continue
+        label = m.get("displayName") or model_id
+        if m.get("isDefault"):
+            default_label = f"Default · {label}"
+        note = None
+        migration = (m.get("upgradeInfo") or {}).get("migrationMarkdown")
+        if migration:
+            note = migration.strip().splitlines()[0]  # e.g. "GPT-5.6 Sol retires on December 23, 2026."
+        option = ModelOption(
+            id=model_id,
+            label=label,
+            description=m.get("description") or None,
+            efforts=[e.get("reasoningEffort") if isinstance(e, dict) else str(e)
+                     for e in m.get("supportedReasoningEfforts") or []],
+            default_effort=m.get("defaultReasoningEffort"),
+            note=note,
+        )
+        models.append(option)
+        if m.get("isDefault"):
+            default_model = option
+
+    info = AccountInfo(plan=((account.get("account") or {}).get("planType")))
+    limits = rate_limits.get("rateLimits") or {}
+    for key in ("primary", "secondary"):
+        window = limits.get(key)
+        if isinstance(window, dict) and window.get("usedPercent") is not None:
+            info.usage.append(UsageWindow(
+                label=_window_label(window.get("windowDurationMins")),
+                used_percent=float(window["usedPercent"]),
+                resets_at=_epoch_to_iso(window.get("resetsAt")),
+            ))
+    credits = limits.get("credits")
+    if isinstance(credits, dict):
+        info.has_credits = credits.get("hasCredits")
+        info.unlimited_credits = credits.get("unlimited")
+        info.credits_balance = credits.get("balance")
+    return Discovery(
+        models=models, default_label=default_label, account=info,
+        default_efforts=default_model.efforts if default_model else [],
+        default_effort=default_model.default_effort if default_model else None,
+    )
+
+
+def _window_label(minutes) -> str:
+    if minutes == 300:
+        return "5-hour limit"
+    if minutes == 10080:
+        return "Weekly limit"
+    if isinstance(minutes, (int, float)) and minutes:
+        hours = minutes / 60
+        return f"{hours:g}-hour limit" if hours < 48 else f"{hours / 24:g}-day limit"
+    return "Usage limit"
+
+
+def _epoch_to_iso(value) -> str | None:
+    if not isinstance(value, (int, float)):
+        return None
+    if value > 10**11:  # milliseconds
+        value /= 1000
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat(timespec="seconds")
 
 
 class CodexParser:

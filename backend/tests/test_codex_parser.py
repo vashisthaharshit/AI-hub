@@ -87,3 +87,9 @@ def test_commands():
 
     resumed = adapter.build_command("codex", RunOptions(resume_session_id="th_1"))
     assert resumed[-3:] == ["resume", "th_1", "-"]
+
+
+def test_command_model():
+    cmd = CodexAdapter().build_command("codex", RunOptions(resume_session_id="th_1", model="gpt-x"))
+    assert cmd[cmd.index("--model") + 1] == "gpt-x"
+    assert cmd.index("--model") < cmd.index("resume")  # exec options come before the subcommand

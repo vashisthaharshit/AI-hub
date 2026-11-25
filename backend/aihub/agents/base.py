@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from aihub.models import AgentEvent, AgentStatus
+from aihub.models import AgentEvent, AgentStatus, Discovery, ModelOption
 
 
 @dataclass
@@ -18,6 +18,8 @@ class RunOptions:
     """Extra settings for one turn of a run."""
 
     resume_session_id: str | None = None  # continue this agent session (follow-ups)
+    model: str | None = None              # None = the agent's default model
+    effort: str | None = None             # None = the model's default effort
     max_turns: int | None = None
     # Supervised mode: set by RunManager. Contains what the approval bridge
     # needs to reach AI-Hub (URL, run id, secret token). None = full access.
@@ -29,6 +31,8 @@ class AgentAdapter(ABC):
     name: str  # shown in the UI, e.g. "Claude Code"
     supports_supervised: bool = False
     supports_follow_up: bool = False
+    # Built-in fallback list, used only if discover() can't ask the CLI.
+    models: list[ModelOption] = []
 
     @abstractmethod
     async def detect(self) -> AgentStatus:
@@ -49,11 +53,20 @@ class AgentAdapter(ABC):
         (implementations kill their process in a `finally` block).
         """
 
+    async def discover(self) -> Discovery:
+        """Ask the CLI which models (and account details) this user has.
+
+        Slower than detect() (it starts the CLI), so the registry caches it.
+        Never costs tokens. The default just returns the built-in list.
+        """
+        return Discovery(models=self.models)
+
     def status(self, state, **fields) -> AgentStatus:
         """Helper so every adapter fills in the same common fields."""
         return AgentStatus(
             id=self.id, name=self.name, state=state,
             supports_supervised=self.supports_supervised,
             supports_follow_up=self.supports_follow_up,
+            models=self.models,
             **fields,
         )

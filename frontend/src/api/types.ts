@@ -3,6 +3,29 @@
 
 export type AgentState = "installed" | "ready" | "not_signed_in" | "not_installed" | "error";
 
+export interface ModelOption {
+  id: string;
+  label: string; // e.g. "Sonnet 5.5"
+  description: string | null;
+  efforts: string[]; // effort levels this model accepts; empty = no effort control
+  default_effort: string | null;
+  note: string | null; // e.g. "GPT-5.6 Sol retires on December 23, 2026."
+}
+
+export interface UsageWindow {
+  label: string; // "5-hour limit", "Weekly limit"
+  used_percent: number;
+  resets_at: string | null;
+}
+
+export interface AccountInfo {
+  plan: string | null;
+  usage: UsageWindow[];
+  has_credits: boolean | null; // null = this agent doesn't report credits
+  credits_balance: string | null;
+  unlimited_credits: boolean | null;
+}
+
 export interface AgentStatus {
   id: string;
   name: string;
@@ -12,6 +35,13 @@ export interface AgentStatus {
   help: string | null;
   supports_supervised: boolean;
   supports_follow_up: boolean;
+  models: ModelOption[]; // empty = only the agent's default
+  default_label: string | null; // e.g. "Default (recommended) · Opus 5.5 ..."
+  default_efforts: string[]; // effort levels when "Default" model is picked
+  default_effort: string | null;
+  account: AccountInfo | null;
+  hidden_models: string[]; // hidden after a "needs credits" failure
+  discovery_error: string | null;
 }
 
 export type EventKind =
@@ -63,6 +93,8 @@ export interface RunInfo {
   worktree_path: string | null;
   base_commit: string | null;
   session_id: string | null;
+  model: string | null; // latest turn's model; null = agent default
+  effort: string | null; // latest turn's effort; null = model default
   supervised: boolean;
   test_command: string | null;
   result: RunResult | null;
@@ -76,6 +108,8 @@ export interface RunCreate {
   prompt: string;
   supervised: boolean;
   test_command: string | null;
+  model: string | null;
+  effort: string | null;
 }
 
 export interface ChangedFile {

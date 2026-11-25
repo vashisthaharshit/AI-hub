@@ -41,6 +41,16 @@ CREATE TABLE IF NOT EXISTS run_events (
     created_at TEXT    NOT NULL,
     PRIMARY KEY (run_id, seq)
 );
+
+-- Models hidden from the pickers, e.g. after a run failed because the model
+-- needs usage credits the account doesn't have. The user can reset them.
+CREATE TABLE IF NOT EXISTS model_flags (
+    agent_id   TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    reason     TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, model)
+);
 """
 
 # Columns added after the first version. A tiny "migration": on startup, any
@@ -53,12 +63,14 @@ ADDED_COLUMNS = {
     "test_command": "TEXT",
     "metrics_json": "TEXT",
     "outcome": "TEXT",
+    "model": "TEXT",
+    "effort": "TEXT",
 }
 
 # Only these fields may be changed by update_run (protects against SQL injection).
 _UPDATABLE = {
     "state", "branch", "worktree_path", "base_commit", "session_id",
-    "result", "metrics", "outcome",
+    "result", "metrics", "outcome", "model", "effort",
 }
 
 
@@ -91,10 +103,11 @@ class Database:
         with self.conn:
             self.conn.execute(
                 "INSERT INTO runs (id, agent_id, repo_path, prompt, state, branch, worktree_path,"
-                " created_at, base_commit, supervised, test_command)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " created_at, base_commit, supervised, test_command, model, effort)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (run.id, run.agent_id, run.repo_path, run.prompt, run.state, run.branch,
-                 run.worktree_path, run.created_at, run.base_commit, int(run.supervised), run.test_command),
+                 run.worktree_path, run.created_at, run.base_commit, int(run.supervised),
+                 run.test_command, run.model, run.effort),
             )
 
     def update_run(self, run_id: str, **fields) -> None:
@@ -141,6 +154,25 @@ class Database:
         ).fetchall()
         return [(r["seq"], AgentEvent(kind=r["kind"], data=json.loads(r["data_json"]))) for r in rows]
 
+    # ---------- hidden models ----------
+
+    def hide_model(self, agent_id: str, model: str, reason: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO model_flags (agent_id, model, reason, created_at) VALUES (?, ?, ?, ?)",
+                (agent_id, model, reason, now_iso()),
+            )
+
+    def unhide_models(self, agent_id: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM model_flags WHERE agent_id = ?", (agent_id,))
+
+    def hidden_models(self) -> dict[str, set[str]]:
+        hidden: dict[str, set[str]] = {}
+        for row in self.conn.execute("SELECT agent_id, model FROM model_flags"):
+            hidden.setdefault(row["agent_id"], set()).add(row["model"])
+        return hidden
+
     def last_seq(self, run_id: str) -> int:
         row = self.conn.execute("SELECT MAX(seq) AS m FROM run_events WHERE run_id = ?", (run_id,)).fetchone()
         return row["m"] if row["m"] is not None else -1
@@ -155,5 +187,5 @@ def _row_to_run(row: sqlite3.Row) -> RunInfo:
         supervised=bool(row["supervised"]), test_command=row["test_command"],
         result=RunResult.model_validate_json(row["result_json"]) if row["result_json"] else None,
         metrics=RunMetrics.model_validate_json(row["metrics_json"]) if row["metrics_json"] else None,
-        outcome=row["outcome"],
+        outcome=row["outcome"], model=row["model"], effort=row["effort"],
     )

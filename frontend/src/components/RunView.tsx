@@ -13,6 +13,7 @@ import type { AgentStatus, RunInfo } from "../api/types";
 import { useRunStream } from "../hooks/useRunStream";
 import { groupEvents, pendingApprovals } from "../lib/events";
 import { ActivityItem } from "./ActivityItem";
+import { ModelPicker } from "./ModelSelect";
 import { StatusBadge } from "./StatusBadge";
 
 // Lazy: Monaco is only downloaded when the Changes tab is first opened.
@@ -60,7 +61,8 @@ export function RunView({ runId, agents, onChanged }: Props) {
   const isRunning = state === "running" || state === "pending";
   const idle = Boolean(run) && !isRunning && !run?.outcome;
   const waitingForMe = isRunning && pendingApprovals(items).length > 0;
-  const supportsFollowUp = Boolean(agents.find((a) => a.id === run?.agent_id)?.supports_follow_up);
+  const agent = agents.find((a) => a.id === run?.agent_id);
+  const supportsFollowUp = Boolean(agent?.supports_follow_up);
 
   async function act(action: () => Promise<RunInfo | unknown>) {
     setError(null);
@@ -73,10 +75,10 @@ export function RunView({ runId, agents, onChanged }: Props) {
     }
   }
 
-  async function sendFollowUp(prompt: string) {
+  async function sendFollowUp(prompt: string, model: string | null, effort: string | null) {
     setError(null);
     try {
-      setRun(await api.followUp(runId, prompt));
+      setRun(await api.followUp(runId, prompt, model, effort));
       setGeneration((g) => g + 1); // the previous turn's socket closed; open a new one
       onChanged();
       return true;
@@ -95,6 +97,8 @@ export function RunView({ runId, agents, onChanged }: Props) {
             <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
               <StatusBadge state={state} />
               {run && <span>{run.agent_id}</span>}
+              {run && <span>model: {run.model ?? "default"}</span>}
+              {run?.effort && <span>effort: {run.effort}</span>}
               {run?.supervised && <span className="text-amber-300">supervised</span>}
               {run?.branch && <span className="font-mono">{run.branch}</span>}
               {waitingForMe && <span className="font-medium text-amber-300">needs your approval</span>}
@@ -141,7 +145,9 @@ export function RunView({ runId, agents, onChanged }: Props) {
               {isRunning && items.length > 0 && <p className="text-xs text-zinc-500">Working...</p>}
             </div>
           </div>
-          {idle && supportsFollowUp && <FollowUpBox onSend={sendFollowUp} />}
+          {idle && supportsFollowUp && agent && run && (
+            <FollowUpBox agent={agent} currentModel={run.model} currentEffort={run.effort} onSend={sendFollowUp} />
+          )}
         </>
       ) : (
         <div className="min-h-0 flex-1">
@@ -202,20 +208,44 @@ function OutcomeBanner({ run }: { run: RunInfo }) {
   );
 }
 
-function FollowUpBox({ onSend }: { onSend: (prompt: string) => Promise<boolean> }) {
+interface FollowUpProps {
+  agent: AgentStatus;
+  currentModel: string | null;
+  currentEffort: string | null;
+  onSend: (prompt: string, model: string | null, effort: string | null) => Promise<boolean>;
+}
+
+function FollowUpBox({ agent, currentModel, currentEffort, onSend }: FollowUpProps) {
   const [text, setText] = useState("");
+  // Start on the run's current model and effort.
+  const [model, setModel] = useState(currentModel ?? "");
+  const [effort, setEffort] = useState(currentEffort ?? "");
   const [sending, setSending] = useState(false);
 
   async function send() {
     if (!text.trim() || sending) return;
     setSending(true);
-    if (await onSend(text.trim())) setText("");
+    if (await onSend(text.trim(), model || null, effort || null)) setText("");
     setSending(false);
   }
 
   return (
     <div className="border-t border-zinc-800 px-6 py-3">
       <div className="mx-auto flex max-w-3xl gap-2">
+        {agent.models.length > 0 && (
+          <div className="w-52 shrink-0 self-end">
+            <ModelPicker
+              agent={agent}
+              model={model}
+              effort={effort}
+              compact
+              onChange={(m, e) => {
+                setModel(m);
+                setEffort(e);
+              }}
+            />
+          </div>
+        )}
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}

@@ -9,6 +9,7 @@ import { useState, type FormEvent } from "react";
 import { api, errorText } from "../api/client";
 import type { AgentStatus, RunInfo } from "../api/types";
 import { isUsable } from "../hooks/useAgents";
+import { ModelPicker } from "./ModelSelect";
 
 const RECENT_KEY = "aihub.recentRepos";
 const TEST_CMD_KEY = "aihub.testCommands"; // { [repoPath]: "pytest -q" }
@@ -50,6 +51,8 @@ export function NewTaskForm({ agents, onCreated }: Props) {
   const [prompt, setPrompt] = useState("");
   const [testCommand, setTestCommand] = useState(savedTestCommands[recent[0] ?? ""] ?? "");
   const [supervised, setSupervised] = useState(false);
+  const [model, setModel] = useState(""); // "" = agent default
+  const [effort, setEffort] = useState(""); // "" = model default
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -76,6 +79,8 @@ export function NewTaskForm({ agents, onCreated }: Props) {
         prompt: prompt.trim(),
         supervised: canSupervise && supervised,
         test_command: testCommand.trim() || null,
+        model: model || null,
+        effort: effort || null,
       });
       remember(repo, testCommand.trim());
       onCreated(run);
@@ -104,7 +109,11 @@ export function NewTaskForm({ agents, onCreated }: Props) {
         ) : (
           <select
             value={selectedId}
-            onChange={(e) => setAgentId(e.target.value)}
+            onChange={(e) => {
+              setAgentId(e.target.value);
+              setModel(""); // models differ per agent
+              setEffort("");
+            }}
             className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
           >
             {usable.map((a) => (
@@ -115,6 +124,21 @@ export function NewTaskForm({ agents, onCreated }: Props) {
           </select>
         )}
       </label>
+
+      {selected && (
+        <label className="flex flex-col gap-1.5">
+          <span className="text-sm font-medium">Model</span>
+          <ModelPicker
+            agent={selected}
+            model={model}
+            effort={effort}
+            onChange={(m, e) => {
+              setModel(m);
+              setEffort(e);
+            }}
+          />
+        </label>
+      )}
 
       <label className="flex flex-col gap-1.5">
         <span className="text-sm font-medium">Repository folder</span>

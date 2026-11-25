@@ -27,8 +27,8 @@ from typing import Any
 
 from aihub import config
 from aihub.agents.base import AgentAdapter, RunOptions
-from aihub.agents.process import ProcessFailed, run_quick, status_from_test, stream_lines
-from aihub.models import AgentEvent, AgentStatus, RunResult
+from aihub.agents.process import JsonLineProcess, ProcessFailed, run_quick, status_from_test, stream_lines
+from aihub.models import AccountInfo, AgentEvent, AgentStatus, Discovery, ModelOption, RunResult
 
 MAX_TOOL_OUTPUT_CHARS = 20_000
 APPROVAL_TOOL = "mcp__aihub__approve"  # mcp__<server name>__<tool name>
@@ -42,6 +42,13 @@ class ClaudeCodeAdapter(AgentAdapter):
     binary = "claude"
     supports_supervised = True
     supports_follow_up = True
+    # Fallback only, if discover() fails. Aliases: Claude Code maps each to
+    # the latest model of that family.
+    models = [
+        ModelOption(id="opus", label="Opus"),
+        ModelOption(id="sonnet", label="Sonnet"),
+        ModelOption(id="haiku", label="Haiku"),
+    ]
 
     def _find(self) -> str | None:
         # shutil.which searches PATH like a terminal does (and handles .exe/.cmd on Windows).
@@ -71,6 +78,32 @@ class ClaudeCodeAdapter(AgentAdapter):
             events = [e async for e in self.run("Reply with just the word OK.", Path(tmp), RunOptions(max_turns=1))]
         return status_from_test(status, events, login_hint="claude auth login")
 
+    # ---------- discovery: models + account ----------
+
+    async def discover(self) -> Discovery:
+        """Ask Claude Code which models this account has.
+
+        Claude Code started with `--input-format stream-json` accepts control
+        requests on stdin. The official Agent SDK sends `initialize` first;
+        the reply lists the account's models with display names and effort
+        levels, plus the subscription type. No prompt is sent: no tokens used.
+        """
+        path = self._find()
+        if not path:
+            return Discovery(models=self.models, error="Claude Code is not installed.")
+        cmd = [path, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+        try:
+            async with JsonLineProcess(cmd) as p:
+                await p.send({"type": "control_request", "request_id": "aihub-init",
+                              "request": {"subtype": "initialize"}})
+                reply = await p.wait_for(
+                    lambda m: m.get("type") == "control_response"
+                    and (m.get("response") or {}).get("request_id") == "aihub-init"
+                )
+        except Exception as exc:  # noqa: BLE001 - fall back to the built-in list
+            return Discovery(models=self.models, error=f"Couldn't read models from Claude Code: {exc}")
+        return parse_initialize((reply.get("response") or {}).get("response") or {}, self.models)
+
     # ---------- running ----------
 
     def build_command(self, path: str, options: RunOptions, mcp_config: Path | None = None) -> list[str]:
@@ -88,6 +121,11 @@ class ClaudeCodeAdapter(AgentAdapter):
             cmd += ["--permission-mode", "acceptEdits"]
         if options.resume_session_id:
             cmd += ["--resume", options.resume_session_id]
+        if options.model:
+            # Always explicit: a resumed session otherwise keeps its old model.
+            cmd += ["--model", options.model]
+        if options.effort:
+            cmd += ["--effort", options.effort]
         if options.max_turns:
             cmd += ["--max-turns", str(options.max_turns)]
         return cmd
@@ -137,6 +175,38 @@ def _write_mcp_config(approval_env: dict[str, str]) -> Path:
 
 
 # ---------- parsing (pure functions: easy to unit-test) ----------
+
+def parse_initialize(response: dict[str, Any], fallback: list[ModelOption]) -> Discovery:
+    """Turn Claude Code's `initialize` reply into a Discovery."""
+    models: list[ModelOption] = []
+    default_label = None
+    default_efforts: list[str] = []
+    for m in response.get("models") or []:
+        if not isinstance(m, dict) or not m.get("value"):
+            continue
+        if m["value"] == "default":
+            # "Default (recommended)" is not a model of its own: it's what
+            # running without --model does. Show it as the label of our
+            # "default" choice instead of a separate entry.
+            desc = m.get("description") or ""
+            default_label = f"{m.get('displayName') or 'Default'}" + (f" · {desc}" if desc else "")
+            default_efforts = list(m.get("supportedEffortLevels") or []) if m.get("supportsEffort", True) else []
+            continue
+        models.append(ModelOption(
+            id=m["value"],
+            label=m.get("displayName") or m["value"],
+            description=m.get("description") or None,
+            efforts=list(m.get("supportedEffortLevels") or []) if m.get("supportsEffort", True) else [],
+        ))
+    account = response.get("account") or {}
+    return Discovery(
+        models=models or fallback,
+        default_label=default_label,
+        default_efforts=default_efforts,
+        account=AccountInfo(plan=account.get("subscriptionType") or None) if account else None,
+        error=None if models else "Claude Code didn't report any models; using the built-in list.",
+    )
+
 
 def parse_line(line: str) -> list[AgentEvent]:
     """Turn one line of Claude Code's stream-json output into AgentEvents."""
