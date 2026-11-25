@@ -24,8 +24,23 @@ export interface ApprovalItem {
   decision?: { behavior: "allow" | "deny"; message: string | null };
 }
 
+export interface UserItem {
+  type: "user";
+  seq: number;
+  text: string;
+  followUp: boolean;
+  model: string | null;
+  effort: string | null;
+  agentId: string | null;
+  // Set when this message switched agents:
+  switchedFrom: string | null;
+  handoff: string | null; // the full prompt the new agent received
+  handoffKind: "template" | "llm" | null;
+  handoffNote: string | null;
+}
+
 export type Item =
-  | { type: "user"; seq: number; text: string; followUp: boolean; model: string | null; effort: string | null }
+  | UserItem
   | { type: "session"; seq: number; model: string | null }
   | ApprovalItem
   | { type: "checks"; seq: number; metrics: RunMetrics }
@@ -51,6 +66,11 @@ export function groupEvents(events: EventMessage[]): Item[] {
           followUp: Boolean(d.follow_up),
           model: (d.model as string) ?? null,
           effort: (d.effort as string) ?? null,
+          agentId: (d.agent_id as string) ?? null,
+          switchedFrom: (d.switched_from as string) ?? null,
+          handoff: (d.handoff as string) ?? null,
+          handoffKind: (d.handoff_kind as "template" | "llm") ?? null,
+          handoffNote: (d.handoff_note as string) ?? null,
         });
         break;
       case "approval_request": {
@@ -75,6 +95,8 @@ export function groupEvents(events: EventMessage[]): Item[] {
         }
         break;
       }
+      case "usage":
+        break; // plan usage: shown in the Agents panel, not in the activity
       case "checks":
         items.push({ type: "checks", seq: e.seq, metrics: d as unknown as RunMetrics });
         break;

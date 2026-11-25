@@ -19,6 +19,8 @@ This file knows nothing about FastAPI or HTTP, so it can be tested and reused
 on its own (the orchestrator in Phase 3 will use it directly).
 """
 
+from __future__ import annotations
+
 import asyncio
 import re
 import secrets
@@ -26,15 +28,20 @@ from collections import defaultdict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from aihub import checks, config, worktree
+from aihub import checks, config, handoff, worktree
 from aihub.agents.base import AgentAdapter, RunOptions
 from aihub.agents.registry import AgentRegistry
 from aihub.db import Database, now_iso
 from aihub.models import (
     AgentEvent, ApprovalDecision, ApprovalRequest, ChangedFile, RunCreate, RunInfo, RunMetrics, RunResult,
+    UsageWindow,
 )
+
+if TYPE_CHECKING:  # only for type hints: avoids an import cycle
+    from aihub.summarizer import Summarizer
 
 _END = None  # marker put on a subscriber's queue when a turn finishes
 
@@ -58,9 +65,10 @@ class _PendingApproval:
 
 
 class RunManager:
-    def __init__(self, db: Database, registry: AgentRegistry):
+    def __init__(self, db: Database, registry: AgentRegistry, summarizer: Summarizer | None = None):
         self.db = db
         self.registry = registry
+        self.summarizer = summarizer  # optional: writes LLM summaries for handoffs
         self._tasks: dict[str, asyncio.Task] = {}
         self._subscribers: dict[str, set[asyncio.Queue]] = defaultdict(set)
         self._next_seq: dict[str, int] = {}
@@ -94,9 +102,16 @@ class RunManager:
         return self.db.get_run(run_id)
 
     async def follow_up(self, run_id: str, prompt: str, model: str | None = None,
-                        effort: str | None = None) -> RunInfo:
-        """Send another message to a finished run: same agent session, same worktree."""
+                        effort: str | None = None, agent_id: str | None = None) -> RunInfo:
+        """Send another message to a finished run, in the same worktree.
+
+        Same agent: its session continues (it remembers everything).
+        Another agent (agent_id): a NEW session starts, and its first prompt is
+        a handoff: a summary of the run so far + your message (see handoff.py).
+        """
         run = self._require_idle(run_id)
+        if agent_id and agent_id != run.agent_id:
+            return await self._switch_agent(run, prompt, agent_id, model, effort)
         adapter = self.registry.get(run.agent_id)
         if not adapter.supports_follow_up:
             raise RunError(f"{adapter.name} doesn't support follow-up messages.")
@@ -113,6 +128,61 @@ class RunManager:
         self._launch(run_id, adapter, prompt, Path(run.worktree_path), resume=run.session_id,
                      model=model, effort=effort)
         return self.db.get_run(run_id)
+
+    async def _switch_agent(self, run: RunInfo, prompt: str, agent_id: str,
+                            model: str | None, effort: str | None) -> RunInfo:
+        adapter = self.registry.get(agent_id)  # KeyError if unknown
+        if run.supervised and not adapter.supports_supervised:
+            raise RunError(f"This run is supervised, and {adapter.name} can't pause for approval. "
+                           "Pick an agent that supports supervised mode.")
+        # The new agent starts fresh: no session yet, and its own model/effort
+        # (the old agent's model names mean nothing to it).
+        self.db.update_run(run.id, state="running", agent_id=adapter.id, session_id=None,
+                           model=model or None, effort=effort or None)
+        self._launch(run.id, adapter, prompt, Path(run.worktree_path), resume=None,
+                     model=model or None, effort=effort or None, handoff_from=run)
+        return self.db.get_run(run.id)
+
+    async def _build_handoff(self, run: RunInfo, new_message: str) -> tuple[str, dict]:
+        """The new agent's first prompt, plus details saved with the user's message."""
+        events = [event for _, event in self.db.events(run.id)]
+        turns = handoff.collect_turns(events, run.agent_id)
+        history = handoff.build_history(events, run)
+        changes = handoff.describe_changes(run.metrics)
+        agents = []
+        for turn in turns:
+            name = self._agent_name(turn.agent)
+            if name not in agents:
+                agents.append(name)
+
+        kind, note, body = "template", None, history
+        settings = self.summarizer.settings() if self.summarizer else None
+        if settings and settings.provider != "off":
+            try:
+                body = await self.summarizer.summarize(f"{history}\n\nCurrent changes: {changes}", settings)
+                kind, note = "llm", f"Summarized by {self.summarizer.describe(settings)}"
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a failed summary must not block the switch
+                note = f"The summary model failed ({exc}); the template handoff was used instead."
+
+        prompt = handoff.build_prompt(
+            previous_agents=", ".join(agents) or self._agent_name(run.agent_id),
+            branch=run.branch,
+            original_task=turns[0].request if turns else run.prompt,
+            history=body,
+            history_is_summary=kind == "llm",
+            changes=changes,
+            new_message=new_message,
+        )
+        return prompt, {"handoff": prompt, "handoff_kind": kind, "handoff_note": note,
+                        "switched_from": run.agent_id}
+
+    def _agent_name(self, agent_id: str) -> str:
+        try:
+            return self.registry.get(agent_id).name
+        except KeyError:
+            return agent_id
 
     def is_active(self, run_id: str) -> bool:
         return run_id in self._tasks
@@ -131,15 +201,17 @@ class RunManager:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     def _launch(self, run_id: str, adapter: AgentAdapter, prompt: str, path: Path,
-                resume: str | None, model: str | None, effort: str | None) -> None:
+                resume: str | None, model: str | None, effort: str | None,
+                handoff_from: RunInfo | None = None) -> None:
         self._next_seq[run_id] = self.db.last_seq(run_id) + 1  # continue numbering after earlier turns
         self._tasks[run_id] = asyncio.create_task(
-            self._execute(run_id, adapter, prompt, path, resume, model, effort))
+            self._execute(run_id, adapter, prompt, path, resume, model, effort, handoff_from))
 
     # ---------- one turn ----------
 
     async def _execute(self, run_id: str, adapter: AgentAdapter, prompt: str, path: Path,
-                       resume: str | None, model: str | None, effort: str | None) -> None:
+                       resume: str | None, model: str | None, effort: str | None,
+                       handoff_from: RunInfo | None = None) -> None:
         run = self.db.get_run(run_id)
         options = RunOptions(resume_session_id=resume, model=model, effort=effort)
         if run.supervised:
@@ -147,17 +219,25 @@ class RunManager:
             self._tokens[run_id] = token
             options.approval_env = {"AIHUB_URL": config.base_url(), "AIHUB_RUN_ID": run_id, "AIHUB_TOKEN": token}
 
-        self._record(run_id, AgentEvent(kind="user_message", data={
-            "text": prompt, "follow_up": resume is not None, "model": model, "effort": effort,
-        }))
         state = "failed"
         result: RunResult | None = None
         errors: list[str] = []
         try:
-            async for event in adapter.run(prompt, path, options):
+            # Switching agents: build the handoff first (may call the summary
+            # model, so it happens here in the background, not in the request).
+            sent_prompt, extra = prompt, {}
+            if handoff_from is not None:
+                sent_prompt, extra = await self._build_handoff(handoff_from, prompt)
+            self._record(run_id, AgentEvent(kind="user_message", data={
+                "text": prompt, "follow_up": resume is not None or handoff_from is not None,
+                "model": model, "effort": effort, "agent_id": adapter.id, **extra,
+            }))
+            async for event in adapter.run(sent_prompt, path, options):
                 self._record(run_id, event)
                 if event.kind == "error":
                     errors.append(str(event.data.get("message", "")))
+                elif event.kind == "usage":
+                    self.registry.update_usage(adapter.id, UsageWindow(**event.data))
                 if event.kind == "session_started" and event.data.get("session_id"):
                     self.db.update_run(run_id, session_id=event.data["session_id"])
                 elif event.kind == "result":
@@ -276,6 +356,39 @@ class RunManager:
             await worktree.delete_branch(repo, run.branch)
         self.db.update_run(run_id, outcome="discarded", worktree_path=None)
         return self.db.get_run(run_id)
+
+    async def delete(self, run_id: str) -> None:
+        """Remove a run from AI-Hub.
+
+        - Work not kept yet (worktree / branch still there): it's discarded too.
+        - Kept work: only the history goes; the branch stays in git.
+        """
+        run = self._require_run(run_id)
+        if self.is_active(run_id):
+            raise RunError("The run is still working. Cancel it first.")
+        repo = Path(run.repo_path)
+        if run.outcome is None and repo.is_dir():
+            if run.worktree_path and Path(run.worktree_path).exists():
+                await worktree.remove_worktree(repo, Path(run.worktree_path))
+            try:
+                await worktree.prune(repo)
+                if run.branch:
+                    await worktree.delete_branch(repo, run.branch)
+            except worktree.GitError:
+                pass  # branch already gone (e.g. deleted by hand): nothing to clean
+        self.db.delete_run(run_id)
+        self._next_seq.pop(run_id, None)
+
+    async def delete_many(self, run_ids: list[str]) -> tuple[list[str], list[dict]]:
+        """Delete several runs. One failure doesn't stop the others."""
+        deleted, failed = [], []
+        for run_id in run_ids:
+            try:
+                await self.delete(run_id)
+                deleted.append(run_id)
+            except (KeyError, RunError, worktree.GitError) as exc:
+                failed.append({"id": run_id, "error": exc.args[0] if exc.args else str(exc)})
+        return deleted, failed
 
     def _require_run(self, run_id: str) -> RunInfo:
         run = self.db.get_run(run_id)

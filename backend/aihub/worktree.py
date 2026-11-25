@@ -178,3 +178,8 @@ async def remove_worktree(repo: Path, worktree: Path) -> None:
 
 async def delete_branch(repo: Path, branch: str) -> None:
     await _git("branch", "-D", branch, cwd=repo)
+
+
+async def prune(repo: Path) -> None:
+    """Forget worktrees whose folders were deleted by hand."""
+    await _git("worktree", "prune", cwd=repo)

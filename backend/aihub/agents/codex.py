@@ -28,9 +28,9 @@ from pathlib import Path
 from typing import Any
 
 from aihub.agents.base import AgentAdapter, RunOptions
-from datetime import datetime, timezone
-
-from aihub.agents.process import JsonLineProcess, ProcessFailed, run_quick, status_from_test, stream_lines
+from aihub.agents.process import (
+    JsonLineProcess, ProcessFailed, epoch_to_iso, run_quick, status_from_test, stream_lines,
+)
 from aihub.models import AccountInfo, AgentEvent, AgentStatus, Discovery, ModelOption, RunResult, UsageWindow
 
 MAX_TOOL_OUTPUT_CHARS = 20_000
@@ -197,7 +197,7 @@ def parse_discovery(raw_models: list[dict], account: dict, rate_limits: dict) ->
             info.usage.append(UsageWindow(
                 label=_window_label(window.get("windowDurationMins")),
                 used_percent=float(window["usedPercent"]),
-                resets_at=_epoch_to_iso(window.get("resetsAt")),
+                resets_at=epoch_to_iso(window.get("resetsAt")),
             ))
     credits = limits.get("credits")
     if isinstance(credits, dict):
@@ -222,12 +222,6 @@ def _window_label(minutes) -> str:
     return "Usage limit"
 
 
-def _epoch_to_iso(value) -> str | None:
-    if not isinstance(value, (int, float)):
-        return None
-    if value > 10**11:  # milliseconds
-        value /= 1000
-    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat(timespec="seconds")
 
 
 class CodexParser:

@@ -14,7 +14,7 @@ import asyncio
 from aihub.agents.base import AgentAdapter
 from aihub.agents.claude_code import ClaudeCodeAdapter
 from aihub.agents.codex import CodexAdapter
-from aihub.models import AgentStatus, Discovery
+from aihub.models import AccountInfo, AgentStatus, Discovery, UsageWindow
 
 
 class AgentRegistry:
@@ -22,6 +22,8 @@ class AgentRegistry:
         self._adapters = {a.id: a for a in adapters}
         self._discovery: dict[str, Discovery] = {}
         self._tested: dict[str, AgentStatus] = {}
+        # Usage windows learned during runs (Claude's rate_limit_event), by agent and label.
+        self._live_usage: dict[str, dict[str, UsageWindow]] = {}
 
     def get(self, agent_id: str) -> AgentAdapter:
         try:
@@ -58,15 +60,38 @@ class AgentRegistry:
             self._discovery[agent_id] = discovery
 
         hidden = hidden or set()
+        account = self._with_live_usage(agent_id, discovery.account)
         return status.model_copy(update={
             "models": [m for m in discovery.models if m.id not in hidden],
             "default_label": discovery.default_label,
             "default_efforts": discovery.default_efforts,
             "default_effort": discovery.default_effort,
-            "account": discovery.account,
+            "account": account,
             "hidden_models": sorted(hidden),
             "discovery_error": discovery.error,
         })
+
+    def update_usage(self, agent_id: str, window: UsageWindow) -> None:
+        self._live_usage.setdefault(agent_id, {})[window.label] = window
+
+    def _with_live_usage(self, agent_id: str, account: AccountInfo | None) -> AccountInfo | None:
+        """Add usage learned during runs to what discovery reported.
+
+        Discovery wins for a window it actually measured (Codex). Live data
+        fills empty placeholders (Claude's "not reported yet") and adds new windows.
+        """
+        live = self._live_usage.get(agent_id)
+        if not live:
+            return account
+        account = account.model_copy(deep=True) if account else AccountInfo()
+        merged = []
+        for window in account.usage:
+            empty = window.used_percent is None and window.status is None
+            merged.append(live[window.label] if empty and window.label in live else window)
+        known = {w.label for w in merged}
+        merged += [w for label, w in live.items() if label not in known]
+        account.usage = merged
+        return account
 
     def remember_test(self, status: AgentStatus) -> None:
         if status.state in ("ready", "not_signed_in"):

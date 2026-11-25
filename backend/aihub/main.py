@@ -10,14 +10,21 @@ Endpoints
   GET  /api/runs                       recent runs
   POST /api/runs                       start a run
   GET  /api/runs/{id}                  one run
-  POST /api/runs/{id}/messages         follow-up message (continues the session)
+  POST /api/runs/{id}/messages         follow-up message; with agent_id: switch agent (handoff)
   POST /api/runs/{id}/cancel           stop a running agent
   GET  /api/runs/{id}/files            changed files, old + new content (diff viewer)
   GET  /api/runs/{id}/diff             changes as unified diff text
   POST /api/runs/{id}/keep             commit to the run's branch, remove the worktree
   POST /api/runs/{id}/discard          delete the worktree and the branch
+  DELETE /api/runs/{id}                remove from history (unkept work is discarded too)
+  POST /api/runs/bulk-delete           same, for several runs {ids: [...]}
   POST /api/runs/{id}/approvals/{aid}  supervised mode: Allow / Deny
   POST /api/internal/approvals         used by the approval MCP server, not the UI
+  GET  /api/settings                   summary model settings + which API keys are saved
+  PUT  /api/settings/summary           save summary model settings
+  POST /api/settings/summary/test      try settings on a tiny example
+  PUT/DELETE /api/settings/keys/{p}    save / remove your own Groq or OpenRouter key (OS keychain)
+  GET  /api/settings/models/{p}        models your key can use
   WS   /ws/runs/{id}?after=-1          past + live events of a run
   /                                    the React app (frontend/dist), if built
 """
@@ -36,9 +43,12 @@ from aihub import config, worktree
 from aihub.agents.registry import default_registry
 from aihub.db import Database
 from aihub.models import (
-    AgentStatus, ApprovalDecision, ApprovalRequest, ChangedFile, FollowUp, RunCreate, RunInfo,
+    AgentStatus, ApprovalDecision, ApprovalRequest, BulkDelete, ChangedFile, FollowUp, KeyUpdate, RunCreate,
+    RunInfo, SettingsView, SummarySettings, SummaryTest, UsageWindow,
 )
 from aihub.runner import RunError, RunManager
+from aihub.secrets_store import UnavailableStore, default_store
+from aihub.summarizer import HTTP_PROVIDERS, Summarizer, SummaryError
 
 
 @asynccontextmanager
@@ -49,7 +59,11 @@ async def lifespan(app: FastAPI):
     db.mark_interrupted_runs()
     app.state.db = db
     app.state.registry = default_registry()
-    app.state.runs = RunManager(db, app.state.registry)
+    for agent_id, data in db.usage_events():  # replay saved usage: newest wins
+        app.state.registry.update_usage(agent_id, UsageWindow(**data))
+    app.state.secrets = default_store()
+    app.state.summarizer = Summarizer(db, app.state.registry, app.state.secrets)
+    app.state.runs = RunManager(db, app.state.registry, app.state.summarizer)
     yield
     # ...and once at shutdown: stop running agents, close the database.
     await app.state.runs.shutdown()
@@ -131,7 +145,7 @@ async def get_run(run_id: str):
 
 @app.post("/api/runs/{run_id}/messages", response_model=RunInfo)
 async def follow_up(run_id: str, body: FollowUp):
-    return await _call(runs().follow_up(run_id, body.prompt, body.model, body.effort))
+    return await _call(runs().follow_up(run_id, body.prompt, body.model, body.effort, body.agent_id))
 
 
 @app.post("/api/runs/{run_id}/cancel")
@@ -153,6 +167,18 @@ async def get_diff(run_id: str):
     return {"diff": await _call(worktree.diff(Path(run.worktree_path), run.base_commit or "HEAD"))}
 
 
+@app.post("/api/runs/bulk-delete")
+async def bulk_delete(body: BulkDelete):
+    deleted, failed = await runs().delete_many(body.ids)
+    return {"deleted": deleted, "failed": failed}
+
+
+@app.delete("/api/runs/{run_id}")
+async def delete_run(run_id: str):
+    await _call(runs().delete(run_id))
+    return {"deleted": True}
+
+
 @app.post("/api/runs/{run_id}/keep", response_model=RunInfo)
 async def keep_run(run_id: str):
     return await _call(runs().keep(run_id))
@@ -161,6 +187,62 @@ async def keep_run(run_id: str):
 @app.post("/api/runs/{run_id}/discard", response_model=RunInfo)
 async def discard_run(run_id: str):
     return await _call(runs().discard(run_id))
+
+
+# ---------- settings: the summary model ----------
+
+def _settings_view() -> SettingsView:
+    secrets = app.state.secrets
+    return SettingsView(
+        summary=app.state.summarizer.settings(),
+        keys={name: secrets.has(name) for name in HTTP_PROVIDERS},
+        keyring_available=not isinstance(secrets, UnavailableStore),
+    )
+
+
+@app.get("/api/settings", response_model=SettingsView)
+async def get_settings():
+    return _settings_view()
+
+
+@app.put("/api/settings/summary", response_model=SettingsView)
+async def save_summary_settings(settings: SummarySettings):
+    app.state.summarizer.save_settings(settings)
+    return _settings_view()
+
+
+@app.post("/api/settings/summary/test", response_model=SummaryTest)
+async def test_summary_settings(settings: SummarySettings):
+    """Try settings before saving them: summarizes a tiny example."""
+    return await app.state.summarizer.test(settings)
+
+
+@app.put("/api/settings/keys/{provider}", response_model=SettingsView)
+async def save_key(provider: str, body: KeyUpdate):
+    """Store the user's own API key in the OS keychain. It is never sent back."""
+    if provider not in HTTP_PROVIDERS:
+        raise HTTPException(404, f"Unknown provider '{provider}'")
+    try:
+        app.state.secrets.set(provider, body.key.strip())
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return _settings_view()
+
+
+@app.delete("/api/settings/keys/{provider}", response_model=SettingsView)
+async def delete_key(provider: str):
+    if provider not in HTTP_PROVIDERS:
+        raise HTTPException(404, f"Unknown provider '{provider}'")
+    app.state.secrets.delete(provider)
+    return _settings_view()
+
+
+@app.get("/api/settings/models/{provider}")
+async def provider_models(provider: str):
+    try:
+        return {"models": await app.state.summarizer.list_models(provider)}
+    except SummaryError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 # ---------- supervised mode ----------

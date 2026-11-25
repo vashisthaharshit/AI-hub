@@ -14,8 +14,10 @@ export interface ModelOption {
 
 export interface UsageWindow {
   label: string; // "5-hour limit", "Weekly limit"
-  used_percent: number;
+  used_percent: number | null; // null = not reported (Claude only sends it near a limit)
+  status: string | null; // "ok" | "warning" | "limit reached"
   resets_at: string | null;
+  updated_at: string | null;
 }
 
 export interface AccountInfo {
@@ -54,6 +56,7 @@ export type EventKind =
   | "approval_resolved"
   | "result"
   | "checks"
+  | "usage"
   | "error"
   | "raw";
 
@@ -119,6 +122,31 @@ export interface ChangedFile {
   modified: string | null;
   binary: boolean;
   too_large: boolean;
+}
+
+// ---------- settings: the summary model ----------
+
+export type SummaryProvider = "off" | "agent" | "groq" | "openrouter";
+
+export interface SummarySettings {
+  provider: SummaryProvider;
+  agent_id: string | null;
+  model: string | null;
+  effort: string | null;
+}
+
+export interface SettingsView {
+  summary: SummarySettings;
+  keys: Record<string, boolean>; // provider -> key saved? (the key itself is never sent)
+  keyring_available: boolean;
+}
+
+export interface SummaryTest {
+  ok: boolean;
+  summary: string | null;
+  used: string | null;
+  duration_ms: number | null;
+  error: string | null;
 }
 
 // Messages sent over the WebSocket /ws/runs/{id}

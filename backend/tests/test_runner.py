@@ -357,3 +357,65 @@ def test_model_needing_credits_gets_hidden(repo, tmp_path):
         assert runs.db.hidden_models() == {}
 
     asyncio.run(scenario())
+
+
+def test_delete_run(repo, tmp_path):
+    async def scenario():
+        runs = make_manager(tmp_path, FakeAdapter())
+        branches = lambda: subprocess.run(["git", "branch", "--list", "aihub/*"], cwd=repo,  # noqa: E731
+                                          capture_output=True, text=True).stdout
+
+        # Not kept: deleting also removes the worktree and the branch.
+        a = await runs.start(RunCreate(agent_id="fake", repo_path=str(repo), prompt="a"))
+        await wait_turn(runs, a.id)
+        wt = Path(runs.db.get_run(a.id).worktree_path)
+        await runs.delete(a.id)
+        assert runs.db.get_run(a.id) is None and runs.db.events(a.id) == []
+        assert not wt.exists() and a.branch not in branches()
+
+        # Kept: deleting only removes history; the branch stays.
+        b = await runs.start(RunCreate(agent_id="fake", repo_path=str(repo), prompt="b"))
+        await wait_turn(runs, b.id)
+        await runs.keep(b.id)
+        await runs.delete(b.id)
+        assert runs.db.get_run(b.id) is None and b.branch in branches()
+
+        with pytest.raises(KeyError):
+            await runs.delete("nope")
+
+    asyncio.run(scenario())
+
+
+def test_delete_refused_while_running(repo, tmp_path):
+    async def scenario():
+        runs = make_manager(tmp_path, FakeAdapter(hang=True))
+        info = await runs.start(RunCreate(agent_id="fake", repo_path=str(repo), prompt="x"))
+        await asyncio.sleep(0.1)
+        with pytest.raises(RunError):
+            await runs.delete(info.id)
+        runs.cancel(info.id)
+        await asyncio.sleep(0.1)
+        await runs.delete(info.id)
+        assert runs.db.get_run(info.id) is None
+
+    asyncio.run(scenario())
+
+
+class UsageAdapter(FakeAdapter):
+    async def run(self, prompt, workdir, options=None):
+        self.calls.append((prompt, options))
+        yield AgentEvent(kind="usage", data={"label": "5-hour limit", "status": "ok", "resets_at": "2026-11-25T18:00:00+00:00"})
+        yield AgentEvent(kind="result", data=RunResult(success=True).model_dump())
+
+
+def test_usage_events_reach_the_registry_and_are_saved(repo, tmp_path):
+    async def scenario():
+        runs = make_manager(tmp_path, UsageAdapter())
+        info = await runs.start(RunCreate(agent_id="fake", repo_path=str(repo), prompt="x"))
+        await wait_turn(runs, info.id)
+        [status] = await runs.registry.scan()
+        assert status.account.usage[0].label == "5-hour limit"
+        assert runs.db.usage_events() == [("fake", {"label": "5-hour limit", "status": "ok",
+                                                     "resets_at": "2026-11-25T18:00:00+00:00"})]
+
+    asyncio.run(scenario())

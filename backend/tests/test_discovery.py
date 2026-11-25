@@ -221,3 +221,38 @@ def test_discover_failure_falls_back(tmp_path, monkeypatch):
     fake_cli(tmp_path, monkeypatch, "codex", "import sys; sys.exit(1)\n")
     d = asyncio.run(CodexAdapter().discover())
     assert d.models == [] and "Couldn't read models" in d.error
+
+
+# ---------- Claude usage windows from rate_limit_event ----------
+
+def test_rate_limit_event_becomes_usage():
+    from aihub.agents.claude_code import parse_line
+    import json as _json
+
+    [ev] = parse_line(_json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed", "resetsAt": 1795620000, "rateLimitType": "five_hour", "isUsingOverage": False}}))
+    assert ev.kind == "usage"
+    assert ev.data["label"] == "5-hour limit" and ev.data["status"] == "ok"
+    assert ev.data["used_percent"] is None and ev.data["resets_at"].startswith("2026-11-")
+
+    [ev] = parse_line(_json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed_warning", "resetsAt": 1796000000000, "utilization": 0.85, "rateLimitType": "seven_day"}}))
+    assert ev.data["label"] == "Weekly limit" and ev.data["status"] == "warning"
+    assert ev.data["used_percent"] == 85.0                    # 0-1 fraction -> percent
+    assert parse_line(_json.dumps({"type": "rate_limit_event", "rate_limit_info": {}})) == []
+
+
+def test_registry_merges_live_usage():
+    from aihub.models import UsageWindow
+
+    async def scenario():
+        adapter = CountingAdapter()
+        reg = AgentRegistry([adapter])
+        [s] = await reg.scan()
+        assert s.account is None
+        reg.update_usage("counting", UsageWindow(label="5-hour limit", status="ok"))
+        reg.update_usage("counting", UsageWindow(label="5-hour limit", status="warning", used_percent=82))
+        [s] = await reg.scan(refresh=True)                    # survives a Re-check
+        assert [(u.label, u.status, u.used_percent) for u in s.account.usage] == [("5-hour limit", "warning", 82)]
+
+    asyncio.run(scenario())

@@ -5,30 +5,20 @@ import { useState } from "react";
 import { api, errorText } from "../api/client";
 import {
   formatCost, formatDuration, formatTokens, summarizeToolInput,
-  type ApprovalItem, type Item, type ToolItem,
+  type ApprovalItem, type Item, type ToolItem, type UserItem,
 } from "../lib/events";
 
 interface Props {
   item: Item;
   runId: string;
   active: boolean; // is the run working right now? (approvals can only be answered then)
+  agentNames: Record<string, string>; // agent id -> display name
 }
 
-export function ActivityItem({ item, runId, active }: Props) {
+export function ActivityItem({ item, runId, active, agentNames }: Props) {
   switch (item.type) {
     case "user":
-      return (
-        <div className="ml-auto max-w-[85%] rounded-lg bg-sky-600/20 px-3 py-2 text-sm whitespace-pre-wrap">
-          {(item.followUp || item.model) && (
-            <p className="mb-0.5 text-[11px] text-sky-300">
-              {[item.followUp && "Follow-up", item.model && `model: ${item.model}`, item.effort && `effort: ${item.effort}`]
-                .filter(Boolean)
-                .join(" · ")}
-            </p>
-          )}
-          {item.text}
-        </div>
-      );
+      return <UserMessage item={item} agentNames={agentNames} />;
     case "session":
       return <p className="text-xs text-zinc-500">Agent started{item.model ? ` · ${item.model}` : ""}</p>;
     case "text":
@@ -46,6 +36,44 @@ export function ActivityItem({ item, runId, active }: Props) {
     case "raw":
       return <Collapsible label="Other event" body={JSON.stringify(item.data, null, 2)} />;
   }
+}
+
+function UserMessage({ item, agentNames }: { item: UserItem; agentNames: Record<string, string> }) {
+  const [showHandoff, setShowHandoff] = useState(false);
+  const name = (id: string | null) => (id ? agentNames[id] ?? id : "");
+  const label = [
+    item.switchedFrom ? `Switched to ${name(item.agentId)}` : item.followUp && "Follow-up",
+    item.model && `model: ${item.model}`,
+    item.effort && `effort: ${item.effort}`,
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <div className="space-y-2">
+      {item.switchedFrom && (
+        <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+          <span className="h-px flex-1 bg-zinc-800" />
+          <span>
+            {name(item.switchedFrom)} → {name(item.agentId)} · new session ·{" "}
+            {item.handoffKind === "llm" ? "LLM summary" : "template"} handoff
+          </span>
+          <span className="h-px flex-1 bg-zinc-800" />
+        </div>
+      )}
+      <div className="ml-auto max-w-[85%] rounded-lg bg-sky-600/20 px-3 py-2 text-sm whitespace-pre-wrap">
+        {label && <p className="mb-0.5 text-[11px] text-sky-300">{label}</p>}
+        {item.text}
+      </div>
+      {item.handoff && (
+        <div className="ml-auto max-w-[85%] text-xs text-zinc-500">
+          {item.handoffNote && <p className={item.handoffKind === "llm" ? "" : "text-amber-300/80"}>{item.handoffNote}</p>}
+          <button onClick={() => setShowHandoff(!showHandoff)} className="hover:text-zinc-300">
+            {showHandoff ? "▾" : "▸"} What {name(item.agentId)} was told (handoff)
+          </button>
+          {showHandoff && <Pre text={item.handoff} />}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ToolCard({ tool }: { tool: ToolItem }) {

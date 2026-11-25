@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 from collections.abc import AsyncIterator, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 
 from aihub.models import AgentEvent, AgentStatus
@@ -86,6 +87,14 @@ async def run_quick(cmd: list[str], timeout: float) -> str:
     if proc.returncode != 0:
         raise RuntimeError(err.decode(errors="replace").strip() or f"exit code {proc.returncode}")
     return out.decode(errors="replace")
+
+
+def epoch_to_iso(value) -> str | None:
+    if not isinstance(value, (int, float)):
+        return None
+    if value > 10**11:  # milliseconds
+        value /= 1000
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat(timespec="seconds")
 
 
 AUTH_HINTS = ("log in", "login", "/login", "auth", "api key", "unauthorized", "401", "credit")

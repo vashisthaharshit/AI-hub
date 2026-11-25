@@ -42,6 +42,13 @@ CREATE TABLE IF NOT EXISTS run_events (
     PRIMARY KEY (run_id, seq)
 );
 
+-- Small app settings, stored as JSON (e.g. which summary model to use).
+-- API keys are NOT stored here: they go to the OS keychain (secrets_store.py).
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL
+);
+
 -- Models hidden from the pickers, e.g. after a run failed because the model
 -- needs usage credits the account doesn't have. The user can reset them.
 CREATE TABLE IF NOT EXISTS model_flags (
@@ -70,7 +77,7 @@ ADDED_COLUMNS = {
 # Only these fields may be changed by update_run (protects against SQL injection).
 _UPDATABLE = {
     "state", "branch", "worktree_path", "base_commit", "session_id",
-    "result", "metrics", "outcome", "model", "effort",
+    "result", "metrics", "outcome", "model", "effort", "agent_id",
 }
 
 
@@ -172,6 +179,34 @@ class Database:
         for row in self.conn.execute("SELECT agent_id, model FROM model_flags"):
             hidden.setdefault(row["agent_id"], set()).add(row["model"])
         return hidden
+
+    # ---------- settings ----------
+
+    def get_setting(self, key: str, default=None):
+        row = self.conn.execute("SELECT value_json FROM settings WHERE key = ?", (key,)).fetchone()
+        return json.loads(row["value_json"]) if row else default
+
+    def set_setting(self, key: str, value) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO settings (key, value_json) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                (key, json.dumps(value)),
+            )
+
+    def usage_events(self) -> list[tuple[str, dict]]:
+        """(agent_id, usage data) for every saved usage event, oldest first.
+        Used at startup so the usage bars aren't empty until the next run."""
+        rows = self.conn.execute(
+            "SELECT r.agent_id, e.data_json FROM run_events e JOIN runs r ON r.id = e.run_id"
+            " WHERE e.kind = 'usage' ORDER BY e.created_at, e.seq"
+        ).fetchall()
+        return [(r["agent_id"], json.loads(r["data_json"])) for r in rows]
+
+    def delete_run(self, run_id: str) -> None:
+        with self.conn:  # one transaction: both go, or neither
+            self.conn.execute("DELETE FROM run_events WHERE run_id = ?", (run_id,))
+            self.conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
 
     def last_seq(self, run_id: str) -> int:
         row = self.conn.execute("SELECT MAX(seq) AS m FROM run_events WHERE run_id = ?", (run_id,)).fetchone()

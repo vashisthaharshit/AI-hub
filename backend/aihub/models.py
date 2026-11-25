@@ -29,9 +29,11 @@ class ModelOption(BaseModel):
 
 
 class UsageWindow(BaseModel):
-    label: str                       # e.g. "5-hour limit", "Weekly limit"
-    used_percent: float
-    resets_at: str | None = None     # ISO time
+    label: str                        # e.g. "5-hour limit", "Weekly limit"
+    used_percent: float | None = None # None = the agent didn't say (Claude only sends it near a limit)
+    status: str | None = None         # "ok" | "warning" | "limit reached" (when the agent reports it)
+    resets_at: str | None = None      # ISO time
+    updated_at: str | None = None     # when we learned this
 
 
 class AccountInfo(BaseModel):
@@ -85,6 +87,7 @@ EventKind = Literal[
     "approval_resolved",  # the user's decision
     "result",             # end of a turn: cost, tokens, time
     "checks",             # AI-Hub's own measurements after a turn (files, tests)
+    "usage",              # plan usage window reported by the agent (e.g. Claude's 5-hour limit)
     "error",              # something failed
     "raw",                # anything we don't understand yet (kept, never dropped)
 ]
@@ -138,10 +141,52 @@ class RunCreate(BaseModel):
     effort: str | None = None          # None = the model's default effort
 
 
+class BulkDelete(BaseModel):
+    ids: list[str] = Field(min_length=1)
+
+
 class FollowUp(BaseModel):
     prompt: str = Field(min_length=1)
-    model: str | None = None  # switch model for this turn and the ones after it
+    model: str | None = None     # switch model for this turn and the ones after it
     effort: str | None = None
+    agent_id: str | None = None  # switch to another agent (gets a handoff of the run so far)
+
+
+# ---------- Settings: the summary model ----------
+
+SummaryProvider = Literal["off", "agent", "groq", "openrouter"]
+
+
+class SummarySettings(BaseModel):
+    """Which LLM writes summaries (e.g. the handoff when switching agents).
+
+    off        -> no LLM: the handoff is the plain template built from events
+    agent      -> one of the user's own agents (e.g. Claude Code + Haiku); uses their plan
+    groq / openrouter -> the user's OWN API key, kept in the OS keychain
+    """
+
+    provider: SummaryProvider = "off"
+    agent_id: str | None = None
+    model: str | None = None
+    effort: str | None = None
+
+
+class SettingsView(BaseModel):
+    summary: SummarySettings
+    keys: dict[str, bool]        # provider -> is a key saved? (the key itself is never sent)
+    keyring_available: bool
+
+
+class KeyUpdate(BaseModel):
+    key: str = Field(min_length=8)
+
+
+class SummaryTest(BaseModel):
+    ok: bool
+    summary: str | None = None
+    used: str | None = None      # e.g. "Claude Code · haiku"
+    duration_ms: int | None = None
+    error: str | None = None
 
 
 class ApprovalDecision(BaseModel):

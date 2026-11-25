@@ -22,13 +22,16 @@ import sys
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from aihub import config
 from aihub.agents.base import AgentAdapter, RunOptions
-from aihub.agents.process import JsonLineProcess, ProcessFailed, run_quick, status_from_test, stream_lines
-from aihub.models import AccountInfo, AgentEvent, AgentStatus, Discovery, ModelOption, RunResult
+from aihub.agents.process import (
+    JsonLineProcess, ProcessFailed, epoch_to_iso, run_quick, status_from_test, stream_lines,
+)
+from aihub.models import AccountInfo, AgentEvent, AgentStatus, Discovery, ModelOption, RunResult, UsageWindow
 
 MAX_TOOL_OUTPUT_CHARS = 20_000
 APPROVAL_TOOL = "mcp__aihub__approve"  # mcp__<server name>__<tool name>
@@ -203,7 +206,12 @@ def parse_initialize(response: dict[str, Any], fallback: list[ModelOption]) -> D
         models=models or fallback,
         default_label=default_label,
         default_efforts=default_efforts,
-        account=AccountInfo(plan=account.get("subscriptionType") or None) if account else None,
+        account=AccountInfo(
+            plan=account.get("subscriptionType") or None,
+            # Claude Code reports these during runs (rate_limit_event), one
+            # window at a time. Until then they show as "not reported yet".
+            usage=[UsageWindow(label="5-hour limit"), UsageWindow(label="Weekly limit")],
+        ) if account else None,
         error=None if models else "Claude Code didn't report any models; using the built-in list.",
     )
 
@@ -249,6 +257,10 @@ def parse_line(line: str) -> list[AgentEvent]:
                 }))
         return events
 
+    if msg_type == "rate_limit_event":
+        window = parse_rate_limit(msg.get("rate_limit_info") or {})
+        return [AgentEvent(kind="usage", data=window.model_dump())] if window else []
+
     if msg_type == "result":
         usage = msg.get("usage") or {}
         # Cached prompt tokens are still input tokens; count all of them.
@@ -269,6 +281,36 @@ def parse_line(line: str) -> list[AgentEvent]:
 
     # Unknown message types are kept as "raw" so no information is lost.
     return [AgentEvent(kind="raw", data=msg)]
+
+
+_WINDOW_LABELS = {
+    "five_hour": "5-hour limit",
+    "seven_day": "Weekly limit",
+    "seven_day_opus": "Weekly limit (Opus)",
+    "seven_day_sonnet": "Weekly limit (Sonnet)",
+    "overage": "Extra usage",
+}
+_STATUS = {"allowed": "ok", "allowed_warning": "warning", "rejected": "limit reached"}
+
+
+def parse_rate_limit(info: dict[str, Any]) -> UsageWindow | None:
+    """Claude Code sends a rate_limit_event during each run. It always says
+    which window and when it resets; the % used is only included when you're
+    near or at the limit."""
+    kind = info.get("rateLimitType")
+    if not kind:
+        return None
+    utilization = info.get("utilization")
+    percent = None
+    if isinstance(utilization, (int, float)):
+        percent = utilization * 100 if utilization <= 1 else float(utilization)  # 0-1 fraction -> %
+    return UsageWindow(
+        label=_WINDOW_LABELS.get(kind, kind.replace("_", " ")),
+        used_percent=percent,
+        status=_STATUS.get(info.get("status"), info.get("status")),
+        resets_at=epoch_to_iso(info.get("resetsAt")),
+        updated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    )
 
 
 def _content_blocks(msg: dict[str, Any]) -> list[dict[str, Any]]:

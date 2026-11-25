@@ -2,20 +2,20 @@
 // signed in with, usage limits and credits (when the agent reports them), and
 // models hidden after a "needs credits" failure.
 
-import type { AccountInfo, AgentStatus } from "../api/types";
+import type { AccountInfo, AgentStatus, UsageWindow } from "../api/types";
 import { StatusBadge } from "./StatusBadge";
 
 interface Props {
   agents: AgentStatus[];
   loading: boolean;
   error: string | null;
-  testingId: string | null;
+  testingIds: Set<string>;
   onRefresh: () => void;
   onTest: (id: string) => void;
   onUnhide: (id: string) => void;
 }
 
-export function AgentsPanel({ agents, loading, error, testingId, onRefresh, onTest, onUnhide }: Props) {
+export function AgentsPanel({ agents, loading, error, testingIds, onRefresh, onTest, onUnhide }: Props) {
   return (
     <section className="border-b border-zinc-800 px-3 py-3">
       <div className="mb-2 flex items-center justify-between">
@@ -61,10 +61,10 @@ export function AgentsPanel({ agents, loading, error, testingId, onRefresh, onTe
               {canTest && agent.state !== "ready" && (
                 <button
                   onClick={() => onTest(agent.id)}
-                  disabled={testingId !== null}
+                  disabled={testingIds.has(agent.id)}
                   className="mt-1.5 text-xs font-medium text-sky-400 hover:text-sky-300 disabled:opacity-50"
                 >
-                  {testingId === agent.id ? "Testing (sends a tiny prompt)..." : "Test connection"}
+                  {testingIds.has(agent.id) ? "Testing (sends a tiny prompt)..." : "Test connection"}
                 </button>
               )}
             </li>
@@ -73,6 +73,50 @@ export function AgentsPanel({ agents, loading, error, testingId, onRefresh, onTe
       </ul>
     </section>
   );
+}
+
+function UsageBar({ window: u }: { window: UsageWindow }) {
+  const pct = u.used_percent;
+  const resets = u.resets_at ? `resets ${formatReset(u.resets_at)}` : null;
+  // Claude only reports the % near a limit; otherwise we show its status.
+  const right =
+    pct !== null ? `${Math.round(pct)}% used`
+      : u.status === "ok" ? "OK"
+        : u.status === "warning" ? "Near the limit"
+          : u.status === "limit reached" ? "Limit reached"
+            : "not reported yet";
+  const color =
+    u.status === "limit reached" || (pct ?? 0) >= 90 ? "bg-red-500"
+      : u.status === "warning" || (pct ?? 0) >= 70 ? "bg-amber-500"
+        : "bg-sky-500";
+  return (
+    <div title={u.updated_at ? `Updated ${new Date(u.updated_at).toLocaleString()}` : undefined}>
+      <div className="flex justify-between gap-2 text-[11px] text-zinc-400">
+        <span>{u.label}</span>
+        <span className={u.status === "limit reached" ? "text-red-300" : u.status === "warning" ? "text-amber-300" : ""}>
+          {right}
+        </span>
+      </div>
+      {pct !== null && (
+        <div className="h-1 overflow-hidden rounded bg-zinc-800">
+          <div className={`h-full ${color}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+        </div>
+      )}
+      {resets && <p className="text-[10px] text-zinc-500">{resets}</p>}
+    </div>
+  );
+}
+
+/** "today 6:30 PM", "tomorrow 9:00 AM" or "Mon 9:00 AM". */
+function formatReset(iso: string): string {
+  const d = new Date(iso);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const today = new Date();
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+  if (d.toDateString() === today.toDateString()) return `today ${time}`;
+  if (d.toDateString() === tomorrow.toDateString()) return `tomorrow ${time}`;
+  return `${d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })} ${time}`;
 }
 
 function Account({ account }: { account: AccountInfo }) {
@@ -85,18 +129,7 @@ function Account({ account }: { account: AccountInfo }) {
   return (
     <div className="mt-1.5 space-y-1">
       {account.usage.map((u) => (
-        <div key={u.label} title={u.resets_at ? `Resets ${new Date(u.resets_at).toLocaleString()}` : undefined}>
-          <div className="flex justify-between text-[11px] text-zinc-400">
-            <span>{u.label}</span>
-            <span>{Math.round(u.used_percent)}% used</span>
-          </div>
-          <div className="h-1 overflow-hidden rounded bg-zinc-800">
-            <div
-              className={`h-full ${u.used_percent >= 90 ? "bg-red-500" : u.used_percent >= 70 ? "bg-amber-500" : "bg-sky-500"}`}
-              style={{ width: `${Math.min(100, Math.max(0, u.used_percent))}%` }}
-            />
-          </div>
-        </div>
+        <UsageBar key={u.label} window={u} />
       ))}
       {credits && <p className="text-[11px] text-zinc-400">{credits}</p>}
     </div>
