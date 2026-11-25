@@ -22,3 +22,6 @@ Thumbs.db
 
 # Local probe results (may contain account info)
 backend/scripts/probe_output.json
+
+# Screenshots / files saved by Claude while building (not part of the app)
+Claude outputs/
