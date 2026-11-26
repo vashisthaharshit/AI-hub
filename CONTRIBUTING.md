@@ -39,23 +39,38 @@ AI-hub/
 │   │   ├── main.py               HTTP + WebSocket routes, serves the built UI (thin layer)
 │   │   ├── config.py             paths, host/port, where the UI build is
 │   │   ├── models.py             Pydantic data shapes used everywhere
-│   │   ├── db.py                 SQLite: runs, append-only event log, settings, small migrations
+│   │   ├── db.py                 SQLite: workspaces, runs, event log, Brain tasks, apps, settings, migrations
+│   │   ├── workspaces.py         one workspace per product (repo folder); old chats adopted at startup
 │   │   ├── runner.py             RunManager: turns, follow-ups, agent switching, approvals, keep/discard
 │   │   ├── handoff.py            the briefing a new agent gets when you switch agents
-│   │   ├── summarizer.py         the summary model (own agent, or own Groq/OpenRouter key)
+│   │   ├── summarizer.py         the cheap "summary model" (own agent, or own Groq/OpenRouter key)
 │   │   ├── secrets_store.py      API keys in the OS keychain (never in files)
 │   │   ├── worktree.py           git: worktree per run, diffs vs the base commit, commit/remove
 │   │   ├── checks.py             after each turn: files/lines changed, test command
-│   │   ├── approval_mcp.py       tiny MCP server Claude Code asks for approvals (supervised mode)
-│   │   └── agents/
-│   │       ├── base.py           AgentAdapter contract + RunOptions
-│   │       ├── process.py        shared: run a CLI, stream its JSON lines, JSON-line conversations
-│   │       ├── claude_code.py    Claude Code adapter
-│   │       ├── codex.py          Codex adapter
-│   │       └── registry.py       the list of agents + cached models/usage
-│   ├── scripts/
-│   │   ├── spike_claude.py       learning: watch Claude Code's raw event stream
-│   │   └── probe_models.py       learning: what models/usage each CLI reports for your account
+│   │   ├── approval_mcp.py       tiny MCP server Claude Code asks for approvals (ask before changes)
+│   │   ├── folder_picker.py      the computer's own "choose a folder" dialog
+│   │   ├── agents/
+│   │   │   ├── base.py           AgentAdapter contract + RunOptions
+│   │   │   ├── process.py        shared: run a CLI, stream its JSON lines
+│   │   │   ├── claude_code.py    Claude Code adapter
+│   │   │   ├── codex.py          Codex adapter
+│   │   │   └── registry.py       the list of agents + cached models/usage
+│   │   ├── brain/                plan a task across agents (no AI where code will do)
+│   │   │   ├── triage.py         small or big? rules first, a tiny AI check only when unsure
+│   │   │   ├── digest.py         a short repo description for the planner, made by code
+│   │   │   ├── planner.py        questions or a plan; checked and fixed by code
+│   │   │   ├── router.py         agent + model + effort per step (Cheapest / Balanced / Best)
+│   │   │   └── tasks.py          Brain tasks: triage -> questions -> plan -> edits
+│   │   └── apps/                 GitHub repos made for agents, used through buttons
+│   │       ├── connect.py        clone or reuse a repo (push disabled for safety)
+│   │       ├── manifest.py       read commands, skills, plugins, requirements (no AI)
+│   │       ├── guide.py          the Guide tab + per-command forms (cheapest model, cached)
+│   │       ├── running.py        prompts, run settings, money safety, outputs
+│   │       ├── setup.py / setup_values.py   the setup form: keys, config files, MCP servers
+│   │       ├── tools.py / install.py         tools an app needs, winget install, skills for Claude Code
+│   │       ├── update.py         "Update repo": backup, then fast-forward
+│   │       └── files.py          uploaded files
+│   ├── scripts/                  learning: raw agent output, what each CLI reports
 │   └── tests/                    pytest
 ├── frontend/                     React + Vite + Tailwind (see frontend/README.md)
 └── docs/images/                  screenshots for the README
@@ -63,8 +78,8 @@ AI-hub/
 
 ## Design rules
 
-1. **Layers only call downward:** `main.py` → `runner.py` → `agents/`, `worktree.py`, `checks.py`, `db.py`.
-   `runner.py` never imports FastAPI; adapters never touch the database.
+1. **Layers only call downward:** `main.py` → `brain/`, `apps/`, `runner.py` → `agents/`, `worktree.py`, `checks.py`, `db.py`.
+   `runner.py` and `brain/` never import FastAPI; adapters never touch the database.
 2. **Agent-specific code lives only in its adapter.** Everything else uses the shared `AgentEvent` format.
 3. **Every data shape is a Pydantic model** in `models.py`, mirrored in `frontend/src/api/types.ts`.
    Change both in the same commit.
@@ -73,6 +88,9 @@ AI-hub/
 6. **The server binds to `127.0.0.1` only.** It can run agents that edit files.
 7. **Secrets never go to files or the database.** Use `secrets_store.py`.
 8. **Every feature comes with a test.**
+9. **Use code before AI.** Anything that is the same every time (reading a repo, checking a plan, picking a
+   model) is done by code: free, instant and testable. AI calls go to the cheapest model that can do the job.
+10. **Apps stay generic.** A fix found while testing one repo must work for every similar repo.
 
 ## Adding a new agent
 

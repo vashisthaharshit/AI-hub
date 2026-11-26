@@ -132,7 +132,7 @@ def _app_context(run: RunInfo) -> app_running.AppRunContext:
     return app_running.build_context(found, values.run_env(found), values.trusted(found.id), command)
 
 
-app = FastAPI(title="AI-Hub", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="AI-Hub", version="0.3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.FRONTEND_ORIGINS,
