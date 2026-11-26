@@ -1,8 +1,9 @@
 """SQLite storage.
 
-Two tables:
+Main tables:
   runs        one row per run (who, what, state, latest result and metrics)
   run_events  every event of every run, in order (an append-only log)
+  apps        connected repos (Apps tab) with their manifest
 
 Keeping the full event log, not just the final state, is called event
 sourcing. It lets the UI replay any old run, and later the router and
@@ -18,7 +19,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from aihub.models import AgentEvent, RunInfo, RunMetrics, RunResult
+from aihub.models import AgentEvent, AppInfo, AppManifest, RunInfo, RunMetrics, RunResult
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -57,6 +58,18 @@ CREATE TABLE IF NOT EXISTS model_flags (
     reason     TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (agent_id, model)
+);
+
+-- Connected apps (Apps tab). manifest_json is what manifest.py found in the
+-- folder; it is rebuilt on "rescan" and after updates.
+CREATE TABLE IF NOT EXISTS apps (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    url           TEXT,
+    path          TEXT NOT NULL UNIQUE,
+    manifest_json TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
 );
 """
 
@@ -208,6 +221,40 @@ class Database:
             self.conn.execute("DELETE FROM run_events WHERE run_id = ?", (run_id,))
             self.conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
 
+    # ---------- apps ----------
+
+    def insert_app(self, app: AppInfo) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO apps (id, name, url, path, manifest_json, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (app.id, app.name, app.url, app.path, app.manifest.model_dump_json(),
+                 app.created_at, app.updated_at),
+            )
+
+    def update_app_manifest(self, app_id: str, manifest: AppManifest) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE apps SET manifest_json = ?, updated_at = ? WHERE id = ?",
+                (manifest.model_dump_json(), now_iso(), app_id),
+            )
+
+    def get_app(self, app_id: str) -> AppInfo | None:
+        row = self.conn.execute("SELECT * FROM apps WHERE id = ?", (app_id,)).fetchone()
+        return _row_to_app(row) if row else None
+
+    def get_app_by_path(self, path: str) -> AppInfo | None:
+        row = self.conn.execute("SELECT * FROM apps WHERE path = ?", (path,)).fetchone()
+        return _row_to_app(row) if row else None
+
+    def list_apps(self) -> list[AppInfo]:
+        rows = self.conn.execute("SELECT * FROM apps ORDER BY created_at DESC, rowid DESC").fetchall()
+        return [_row_to_app(r) for r in rows]
+
+    def delete_app(self, app_id: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM apps WHERE id = ?", (app_id,))
+
     def last_seq(self, run_id: str) -> int:
         row = self.conn.execute("SELECT MAX(seq) AS m FROM run_events WHERE run_id = ?", (run_id,)).fetchone()
         return row["m"] if row["m"] is not None else -1
@@ -223,4 +270,12 @@ def _row_to_run(row: sqlite3.Row) -> RunInfo:
         result=RunResult.model_validate_json(row["result_json"]) if row["result_json"] else None,
         metrics=RunMetrics.model_validate_json(row["metrics_json"]) if row["metrics_json"] else None,
         outcome=row["outcome"], model=row["model"], effort=row["effort"],
+    )
+
+
+def _row_to_app(row: sqlite3.Row) -> AppInfo:
+    return AppInfo(
+        id=row["id"], name=row["name"], url=row["url"], path=row["path"],
+        created_at=row["created_at"], updated_at=row["updated_at"],
+        manifest=AppManifest.model_validate_json(row["manifest_json"]),
     )

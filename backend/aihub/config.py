@@ -11,6 +11,11 @@ DATA_DIR = Path(os.environ.get("AIHUB_DATA_DIR", Path.home() / ".aihub"))
 DB_PATH = DATA_DIR / "aihub.db"
 WORKTREES_DIR = DATA_DIR / "worktrees"
 
+# Where connected apps (GitHub repos) are cloned unless the user picks
+# another folder. Visible in the user's home on purpose: these folders hold
+# the user's own files (e.g. their CV), so they should be easy to find.
+APPS_DIR = Path(os.environ.get("AIHUB_APPS_DIR", Path.home() / "aihub" / "repos"))
+
 # The server only listens on this machine. It can run agents that edit files,
 # so it must never be reachable from the network.
 HOST = "127.0.0.1"

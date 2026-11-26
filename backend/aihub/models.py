@@ -232,3 +232,84 @@ class RunInfo(BaseModel):
     result: RunResult | None = None     # result of the latest turn
     metrics: RunMetrics | None = None   # measured after the latest turn
     outcome: RunOutcome | None = None   # set once the user keeps or discards the work
+
+
+# ---------- Apps (repos built on an agent, used through buttons) ----------
+
+class AppCommand(BaseModel):
+    """One slash command of the repo; shown as a button."""
+
+    name: str                       # what follows the slash: "apply" -> /apply
+    namespace: str | None = None    # sub-folder of .claude/commands, if any
+    title: str                      # button text, e.g. "Apply"
+    description: str | None = None  # what it does (from the file)
+    argument_hint: str | None = None  # e.g. "either a URL or pasted text"
+    input: Literal["none", "optional", "required"] = "none"  # text field next to the button?
+    kind: Literal["start", "normal", "danger"] = "normal"  # start = "Start here", danger = ask first
+    agent: Literal["claude", "codex"] = "claude"           # whose format the command is in
+    source: str                     # file it came from, relative to the repo
+    from_skill: bool = False        # a skill the repo tells users to type (/scrape)
+
+
+class AppSkill(BaseModel):
+    name: str
+    description: str | None = None
+    agent: Literal["claude", "codex"]
+    source: str
+    user_invocable: bool = True
+    # Only used while reading the repo (to decide which skills are buttons).
+    raw_description: str = Field(default="", exclude=True)
+    body: str = Field(default="", exclude=True)
+
+
+class AppRequirement(BaseModel):
+    """A program the repo needs on this machine."""
+
+    id: str                 # "git", "python", "bun", "latex", "docker"...
+    label: str
+    why: str                # shown to the user: why we think it's needed
+    installed: bool
+    optional: bool = False
+    auto: bool = False      # AI-Hub sets it up by itself (Python, via uv)
+
+
+class AppPermissions(BaseModel):
+    """What the repo's .claude/settings.json lets the agent do, in plain words."""
+
+    found: bool
+    allow: list[str] = Field(default_factory=list)
+    ask: list[str] = Field(default_factory=list)
+    deny: list[str] = Field(default_factory=list)
+    raw: list[str] = Field(default_factory=list)  # the original rules
+    error: str | None = None
+
+
+class AppManifest(BaseModel):
+    name: str
+    summary: str | None = None      # first paragraph of the README
+    tier: Literal[1, 2, 3]          # 1 commands, 2 only instructions, 3 not an app
+    agents: list[str] = Field(default_factory=list)   # agents it was made for
+    primary_agent: str | None = None
+    commands: list[AppCommand] = Field(default_factory=list)
+    skills: list[AppSkill] = Field(default_factory=list)
+    requirements: list[AppRequirement] = Field(default_factory=list)
+    permissions: AppPermissions = Field(default_factory=lambda: AppPermissions(found=False))
+    context_files: list[str] = Field(default_factory=list)
+
+
+class AppConnect(BaseModel):
+    """Connect a GitHub link (cloned into `folder`) or a folder already on this machine (`path`)."""
+
+    url: str | None = None
+    folder: str | None = None   # where to clone into; default ~/aihub/repos
+    path: str | None = None     # an existing local clone instead of a link
+
+
+class AppInfo(BaseModel):
+    id: str
+    name: str
+    url: str | None = None
+    path: str
+    created_at: str
+    updated_at: str
+    manifest: AppManifest

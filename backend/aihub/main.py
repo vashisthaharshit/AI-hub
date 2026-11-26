@@ -25,6 +25,12 @@ Endpoints
   POST /api/settings/summary/test      try settings on a tiny example
   PUT/DELETE /api/settings/keys/{p}    save / remove your own Groq or OpenRouter key (OS keychain)
   GET  /api/settings/models/{p}        models your key can use
+  GET  /api/apps                       connected apps (Apps tab)
+  GET  /api/apps/default-folder        where links are cloned unless the user picks another folder
+  POST /api/apps                       connect {url, folder} or {path}: clone + read the repo
+  GET  /api/apps/{id}                  one app with its manifest (commands, tools it needs...)
+  POST /api/apps/{id}/rescan           read the folder again
+  DELETE /api/apps/{id}                remove from the Apps tab (the folder is NOT deleted)
   WS   /ws/runs/{id}?after=-1          past + live events of a run
   /                                    the React app (frontend/dist), if built
 """
@@ -40,10 +46,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from aihub import config, worktree
+from aihub.apps import connect as apps
 from aihub.agents.registry import default_registry
 from aihub.db import Database
 from aihub.models import (
-    AgentStatus, ApprovalDecision, ApprovalRequest, BulkDelete, ChangedFile, FollowUp, KeyUpdate, RunCreate,
+    AgentStatus, AppConnect, AppInfo, ApprovalDecision, ApprovalRequest, BulkDelete, ChangedFile, FollowUp, KeyUpdate, RunCreate,
     RunInfo, SettingsView, SummarySettings, SummaryTest, UsageWindow,
 )
 from aihub.runner import RunError, RunManager
@@ -89,7 +96,7 @@ async def _call(coro):
         return await coro
     except KeyError as exc:
         raise HTTPException(404, exc.args[0] if exc.args else "Not found") from None
-    except (RunError, worktree.GitError) as exc:
+    except (RunError, worktree.GitError, apps.AppError) as exc:
         raise HTTPException(400, str(exc)) from None
 
 
@@ -243,6 +250,48 @@ async def provider_models(provider: str):
         return {"models": await app.state.summarizer.list_models(provider)}
     except SummaryError as exc:
         raise HTTPException(400, str(exc)) from None
+
+
+# ---------- apps ----------
+
+@app.get("/api/apps", response_model=list[AppInfo])
+async def list_apps():
+    return app.state.db.list_apps()
+
+
+@app.get("/api/apps/default-folder")
+async def apps_default_folder():
+    return {"folder": str(apps.default_folder())}
+
+
+@app.post("/api/apps", response_model=AppInfo, status_code=201)
+async def connect_app(req: AppConnect):
+    """Can take a while: cloning downloads the whole repo."""
+    return await _call(apps.connect(req, app.state.db))
+
+
+@app.get("/api/apps/{app_id}", response_model=AppInfo)
+async def get_app(app_id: str):
+    found = app.state.db.get_app(app_id)
+    if not found:
+        raise HTTPException(404, f"App '{app_id}' not found")
+    return found
+
+
+@app.post("/api/apps/{app_id}/rescan", response_model=AppInfo)
+async def rescan_app(app_id: str):
+    async def do():
+        return apps.rescan(app_id, app.state.db)
+    return await _call(do())
+
+
+@app.delete("/api/apps/{app_id}")
+async def forget_app(app_id: str):
+    """Only removes it from the list. The folder may hold the user's own
+    files (CV, documents), so AI-Hub never deletes it."""
+    await get_app(app_id)
+    app.state.db.delete_app(app_id)
+    return {"deleted": True}
 
 
 # ---------- supervised mode ----------
