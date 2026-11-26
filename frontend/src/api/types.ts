@@ -107,6 +107,9 @@ export interface RunInfo {
   kind: "task" | "app"; // app = an app's command, run in the app's own folder
   app_id: string | null;
   label: string | null; // what the user clicked, e.g. "Check and apply to a job"
+  workspace_id: string | null;
+  origin: "manual" | "brain"; // brain = started by a Brain task, hidden from Manual until moved
+  brain_task_id: string | null;
 }
 
 export interface AppRunCreate {
@@ -130,6 +133,8 @@ export interface RunCreate {
   test_command: string | null;
   model: string | null;
   effort: string | null;
+  workspace_id?: string | null; // the workspace this chat belongs to
+  brain_task_id?: string | null; // started from a Brain task: listed there, not in Manual
 }
 
 export interface ChangedFile {
@@ -410,4 +415,98 @@ export interface AppGuide {
   made_by: string | null; // e.g. "Claude Code · haiku"
   fingerprint: string;
   created_at: string;
+}
+
+// ---------- Brain (backend brain/) ----------
+
+export type BrainMode = "cheapest" | "balanced" | "best";
+export type StepType = "explore" | "build" | "test" | "review" | "fix";
+export type Difficulty = "easy" | "medium" | "hard";
+
+// Who does a step (backend brain/router.py)
+export interface StepAssignment {
+  agent_id: string;
+  agent_name: string;
+  model: string | null; // null = the agent's default model
+  model_label: string;
+  effort: string | null; // null = the model's default effort
+  reason: string;
+  manual: boolean; // the user picked it; kept while it can be used
+}
+
+export interface PlanStep {
+  id: string;
+  title: string;
+  type: StepType;
+  difficulty: Difficulty;
+  files: string[]; // what it will likely touch; decides what runs in parallel
+  depends_on: string[]; // step ids that must finish first
+  brief: string; // what the agent is told to do
+  done_when: string; // how AI-Hub checks it worked
+  assignment: StepAssignment | null; // the router fills it in
+}
+
+export interface BrainPlan {
+  steps: PlanStep[];
+  waves: string[][]; // steps in one wave run at the same time
+  notes: string[]; // what AI-Hub fixed in the plan
+  routing_notes: string[]; // from the router
+  problems: string[]; // must be fixed before it can run
+  single: boolean; // only one work step: better to run it directly
+  made_by: string | null;
+}
+
+export interface TriageResult {
+  size: "small" | "big";
+  how: "rules" | "ai" | "user";
+  reasons: string[];
+}
+
+export interface BrainTask {
+  id: string;
+  workspace_id: string | null;
+  repo_path: string;
+  request: string;
+  test_command: string | null;
+  mode: BrainMode;
+  approval: "all" | "each";
+  state: "direct" | "asking" | "planned";
+  triage: TriageResult;
+  questions: string[];
+  answers: string[];
+  plan: BrainPlan | null;
+  direct: StepAssignment | null; // small tasks: the one agent + model the router picked
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BrainCreate {
+  workspace_id?: string | null;
+  repo_path?: string | null;
+  request: string;
+  test_command?: string | null;
+  mode?: BrainMode | null;
+  approval?: "all" | "each";
+  plan?: boolean | null; // true = always plan, false = never, null = triage decides
+}
+
+export interface BrainSettings {
+  mode: BrainMode; // the default for new Brain tasks
+}
+
+// ---------- Workspaces (one per product = one repo; backend workspaces.py) ----------
+
+export type WorkspaceColor = "sky" | "violet" | "emerald" | "amber" | "rose" | "cyan" | "fuchsia" | "lime";
+
+export interface Workspace {
+  id: string;
+  name: string;
+  repo_path: string;
+  test_command: string | null;
+  color: WorkspaceColor;
+  created_at: string;
+  updated_at: string;
+  manual_count: number;
+  brain_count: number;
+  last_activity: string | null;
 }

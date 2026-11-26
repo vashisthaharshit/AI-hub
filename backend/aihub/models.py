@@ -135,6 +135,8 @@ RunOutcome = Literal["kept", "discarded"]
 class RunCreate(BaseModel):
     agent_id: str
     repo_path: str
+    workspace_id: str | None = None    # the workspace this chat belongs to
+    brain_task_id: str | None = None   # started from a Brain task: listed there, not in Manual
     prompt: str = Field(min_length=1)
     supervised: bool = False           # ask before each edit / command
     test_command: str | None = None    # e.g. "pytest -q"; run after each turn
@@ -238,6 +240,11 @@ class RunInfo(BaseModel):
     kind: Literal["task", "app"] = "task"
     app_id: str | None = None
     label: str | None = None            # app runs: what the user clicked, e.g. "Check and apply to a job"
+    workspace_id: str | None = None     # the workspace (one repo) this chat belongs to
+    # Where it shows up: "manual" runs are in Manual's list; "brain" runs were
+    # started by a Brain task and only show there, until moved to Manual.
+    origin: Literal["manual", "brain"] = "manual"
+    brain_task_id: str | None = None
 
 
 # ---------- Apps (repos built on an agent, used through buttons) ----------
@@ -530,3 +537,126 @@ class AppUpdateResult(BaseModel):
     backed_up_files: int = 0
     conflicts: list[str] = Field(default_factory=list)
     app: AppInfo
+
+
+# ---------- Brain (Phase 3: plan a task across agents) ----------
+
+BrainMode = Literal["cheapest", "balanced", "best"]
+
+
+class StepAssignment(BaseModel):
+    """Who does a step (see brain/router.py)."""
+
+    agent_id: str
+    agent_name: str
+    model: str | None = None        # None = the agent's default model
+    model_label: str
+    effort: str | None = None       # None = the model's default effort
+    reason: str                     # shown to the user, e.g. "Sonnet: medium build step, Balanced mode"
+    manual: bool = False            # the user picked it; the router keeps it while it can be used
+
+
+class PlanStep(BaseModel):
+    """One step of a Brain plan (see brain/planner.py)."""
+
+    id: str
+    title: str
+    type: Literal["explore", "build", "test", "review", "fix"] = "build"
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    files: list[str] = Field(default_factory=list)       # what it will likely touch (decides what runs in parallel)
+    depends_on: list[str] = Field(default_factory=list)  # step ids that must finish first
+    brief: str                                           # what the agent is told to do
+    done_when: str                                       # how AI-Hub checks it worked
+    assignment: StepAssignment | None = None             # agent + model + effort (the router fills it in)
+
+
+class BrainPlan(BaseModel):
+    steps: list[PlanStep] = Field(default_factory=list)
+    waves: list[list[str]] = Field(default_factory=list)  # steps in one wave run at the same time
+    notes: list[str] = Field(default_factory=list)        # what code fixed in the plan, shown to the user
+    routing_notes: list[str] = Field(default_factory=list)  # from the router (e.g. "your pick can't be used")
+    problems: list[str] = Field(default_factory=list)     # what still needs fixing before it can run
+    single: bool = False                                   # only one work step: better to run it directly
+    made_by: str | None = None                             # which model wrote it
+
+
+class TriageResult(BaseModel):
+    size: Literal["small", "big"]
+    how: Literal["rules", "ai", "user"]
+    reasons: list[str] = Field(default_factory=list)
+
+
+class BrainTask(BaseModel):
+    id: str
+    workspace_id: str | None = None
+    repo_path: str
+    request: str
+    test_command: str | None = None
+    mode: BrainMode = "balanced"
+    approval: Literal["all", "each"] = "all"   # run the whole plan, or approve before each step
+    # direct  = small: run it with one agent (no plan)
+    # asking  = the planner asked clarifying questions
+    # planned = there is a plan to review / edit
+    state: Literal["direct", "asking", "planned"]
+    triage: TriageResult
+    questions: list[str] = Field(default_factory=list)
+    answers: list[str] = Field(default_factory=list)
+    plan: BrainPlan | None = None
+    direct: StepAssignment | None = None       # small tasks: the one agent + model the router picked
+    created_at: str
+    updated_at: str
+
+
+class BrainCreate(BaseModel):
+    workspace_id: str | None = None            # the usual way: the workspace's repo is used
+    repo_path: str | None = None               # or a repo folder directly
+    request: str = Field(min_length=1)
+    test_command: str | None = None
+    mode: BrainMode | None = None              # None = the default from Settings
+    approval: Literal["all", "each"] = "all"
+    plan: bool | None = None                   # True = always plan, False = never; None = triage decides
+
+
+class BrainPlanRequest(BaseModel):
+    answers: list[str] = Field(default_factory=list)  # answers to the planner's questions, in order
+    skip_questions: bool = False                     # "Just plan it" without answering
+
+
+class BrainTaskEdit(BaseModel):
+    steps: list[PlanStep] | None = None        # the edited plan (checked again by code)
+    mode: BrainMode | None = None
+    approval: Literal["all", "each"] | None = None
+    reroute: bool = False                      # pick agents again for every step (drops your own picks)
+
+
+class BrainSettings(BaseModel):
+    mode: BrainMode = "balanced"               # the default for new Brain tasks
+
+
+# ---------- Workspaces (one per product = one repo; holds its chats) ----------
+
+class Workspace(BaseModel):
+    id: str
+    name: str
+    repo_path: str
+    test_command: str | None = None    # used by new chats in this workspace
+    color: str = "sky"                 # accent shown on its card
+    created_at: str
+    updated_at: str
+    # filled in when listing (not stored)
+    manual_count: int = 0
+    brain_count: int = 0
+    last_activity: str | None = None
+
+
+class WorkspaceCreate(BaseModel):
+    repo_path: str = Field(min_length=1)
+    name: str | None = None            # default: the folder's name
+    test_command: str | None = None
+    color: str | None = None
+
+
+class WorkspaceEdit(BaseModel):
+    name: str | None = None
+    test_command: str | None = None
+    color: str | None = None

@@ -259,7 +259,7 @@ function Collapsible({ label, body }: { label: string; body: string }) {
 function Pre({ label, text }: { label?: string; text: string }) {
   return (
     <div className="mt-2">
-      {label && <p className="mb-1 text-[11px] uppercase tracking-wide text-zinc-500">{label}</p>}
+      {label && <p className="mb-1 text-[11px] font-semibold text-zinc-500">{label}</p>}
       <pre className="max-h-72 overflow-auto rounded bg-zinc-950 p-2 font-mono text-xs text-zinc-300">{text}</pre>
     </div>
   );

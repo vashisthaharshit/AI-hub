@@ -17,9 +17,9 @@ interface Props {
 
 export function AgentsPanel({ agents, loading, error, testingIds, onRefresh, onTest, onUnhide }: Props) {
   return (
-    <section className="border-b border-zinc-800 px-3 py-3">
+    <section className="px-3 py-3">
       <div className="mb-2 flex items-center justify-between">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Agents</h2>
+        <h2 className="font-display text-base font-bold">Your agents</h2>
         <button
           onClick={onRefresh}
           disabled={loading}

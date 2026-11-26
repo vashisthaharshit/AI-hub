@@ -3,8 +3,8 @@
 // in dev, Vite's proxy forwards them; in production, the backend serves the UI.
 
 import type {
-  AgentStatus, AppConnect, AppGuide, AppInfo, AppRunCreate, AppUpdateCheck, AppUpdateResult, SetupView, AppRequirement, ChangedFile, InstallJob, RunCreate, RunInfo, SettingsView,
-  SummarySettings, SummaryTest,
+  AgentStatus, AppConnect, BrainCreate, BrainMode, BrainSettings, BrainTask, PlanStep, AppGuide, AppInfo, AppRunCreate, AppUpdateCheck, AppUpdateResult, SetupView, AppRequirement, ChangedFile, InstallJob, RunCreate, RunInfo, SettingsView,
+  SummarySettings, SummaryTest, Workspace,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -38,7 +38,23 @@ export const api = {
   testAgent: (id: string) => request<AgentStatus>(`/api/agents/${id}/test`, { method: "POST" }),
   unhideModels: (id: string) => request<AgentStatus>(`/api/agents/${id}/models/unhide`, { method: "POST" }),
 
-  runs: () => request<RunInfo[]>("/api/runs"),
+  // Manual's chats in a workspace (Brain's runs stay out until moved), or one Brain task's runs.
+  runs: (opts: { workspaceId?: string | null; brainTaskId?: string | null } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.workspaceId) params.set("workspace_id", opts.workspaceId);
+    if (opts.brainTaskId) params.set("brain_task_id", opts.brainTaskId);
+    const q = params.toString();
+    return request<RunInfo[]>(`/api/runs${q ? `?${q}` : ""}`);
+  },
+  moveToManual: (id: string) => request<RunInfo>(`/api/runs/${id}/move-to-manual`, { method: "POST" }),
+
+  workspaces: () => request<Workspace[]>("/api/workspaces"),
+  workspace: (id: string) => request<Workspace>(`/api/workspaces/${id}`),
+  createWorkspace: (body: { repo_path: string; name?: string | null; test_command?: string | null; color?: string | null }) =>
+    request<Workspace>("/api/workspaces", { method: "POST", body: JSON.stringify(body) }),
+  editWorkspace: (id: string, body: { name?: string; test_command?: string; color?: string }) =>
+    request<Workspace>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteWorkspace: (id: string) => request<{ deleted: boolean }>(`/api/workspaces/${id}`, { method: "DELETE" }),
   run: (id: string) => request<RunInfo>(`/api/runs/${id}`),
   createRun: (body: RunCreate) =>
     request<RunInfo>("/api/runs", { method: "POST", body: JSON.stringify(body) }),
@@ -73,6 +89,22 @@ export const api = {
     request<SettingsView>(`/api/settings/keys/${provider}`, { method: "PUT", body: JSON.stringify({ key }) }),
   deleteKey: (provider: string) => request<SettingsView>(`/api/settings/keys/${provider}`, { method: "DELETE" }),
   providerModels: (provider: string) => request<{ models: string[] }>(`/api/settings/models/${provider}`),
+
+  // Brain tab. Creating or planning can take 10-40 s (the planner writes the plan).
+  brainTasks: (workspaceId?: string | null) =>
+    request<BrainTask[]>(`/api/brain/tasks${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ""}`),
+  brainTask: (id: string) => request<BrainTask>(`/api/brain/tasks/${id}`),
+  createBrainTask: (body: BrainCreate) =>
+    request<BrainTask>("/api/brain/tasks", { method: "POST", body: JSON.stringify(body) }),
+  planBrainTask: (id: string, body: { answers?: string[]; skip_questions?: boolean }) =>
+    request<BrainTask>(`/api/brain/tasks/${id}/plan`, { method: "POST", body: JSON.stringify(body) }),
+  editBrainTask: (id: string, body: { steps?: PlanStep[]; mode?: BrainMode; approval?: "all" | "each"; reroute?: boolean }) =>
+    request<BrainTask>(`/api/brain/tasks/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  brainSettings: () => request<BrainSettings>("/api/settings/brain"),
+  saveBrainSettings: (body: BrainSettings) =>
+    request<BrainSettings>("/api/settings/brain", { method: "PUT", body: JSON.stringify(body) }),
+  brainDirect: (id: string) => request<BrainTask>(`/api/brain/tasks/${id}/direct`, { method: "POST" }),
+  deleteBrainTask: (id: string) => request<{ deleted: boolean }>(`/api/brain/tasks/${id}`, { method: "DELETE" }),
 
   // Apps tab
   apps: () => request<AppInfo[]>("/api/apps"),

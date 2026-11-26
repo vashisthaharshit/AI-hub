@@ -25,7 +25,7 @@ export function AppsSidebar({ selectedId, connecting, refreshKey, onConnect, onS
         <span aria-hidden="true">+</span> Connect a repo
       </button>
       <section className="flex min-h-0 flex-1 flex-col px-3 py-3">
-        <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Your apps</h2>
+        <h2 className="sidebar-heading">Your apps</h2>
         {apps === null ? (
           <p className="px-1 text-xs text-zinc-500">Loading...</p>
         ) : apps.length === 0 ? (

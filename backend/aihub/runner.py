@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from aihub import checks, config, handoff, worktree
+from aihub import checks, config, handoff, workspaces, worktree
 from aihub.apps import running
 from aihub.agents.base import AgentAdapter, RunOptions
 from aihub.agents.registry import AgentRegistry
@@ -99,6 +99,8 @@ class RunManager:
             raise RunError(f"{adapter.name} doesn't support supervised mode yet.")
         repo = await worktree.repo_root(Path(req.repo_path))  # GitError if not a repo
         base = await worktree.head_commit(repo)
+        # every Manual/Brain chat belongs to a workspace (made for this repo if needed)
+        workspace_id = req.workspace_id or workspaces.ensure_for_repo(self.db, str(repo)).id
 
         run_id = uuid4().hex[:12]
         self.db.insert_run(RunInfo(
@@ -106,6 +108,8 @@ class RunManager:
             state="pending", created_at=now_iso(), base_commit=base,
             supervised=req.supervised, test_command=(req.test_command or "").strip() or None,
             model=req.model or None, effort=req.effort or None,
+            workspace_id=workspace_id, brain_task_id=req.brain_task_id,
+            origin="brain" if req.brain_task_id else "manual",
         ))
         try:
             branch, path = await worktree.create_worktree(repo, run_id, base)

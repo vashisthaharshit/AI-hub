@@ -334,6 +334,6 @@ def read_setup(repo: Path, plugins: list[PluginInfo], skill_texts: list[tuple[st
     # name + FIRST SENTENCE only: long descriptions mention brokers and trades in passing
     # ("checks every trade against your limits") without moving money themselves.
     money_commands = [name for name, text in skill_texts
-                      if _MONEY_SKILL.search(name) or _MONEY_SKILL.search(re.split(r"(?<=[.!?])\s", text.strip(), 1)[0])]
+                      if _MONEY_SKILL.search(name) or _MONEY_SKILL.search(re.split(r"(?<=[.!?])\s", text.strip(), maxsplit=1)[0])]
     return AppSetup(fields=fields, files=setup_files, servers=servers, always_ask=always_ask,
                     money_commands=money_commands)

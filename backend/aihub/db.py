@@ -19,7 +19,9 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from aihub.models import AgentEvent, AppGuide, AppInfo, AppManifest, RunInfo, RunMetrics, RunResult
+from aihub.models import (
+    AgentEvent, AppGuide, AppInfo, AppManifest, BrainTask, RunInfo, RunMetrics, RunResult, Workspace,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -71,6 +73,27 @@ CREATE TABLE IF NOT EXISTS apps (
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
+
+-- Workspaces: one per product (= one repo folder). Manual runs and Brain
+-- tasks belong to one; Apps stay outside workspaces.
+CREATE TABLE IF NOT EXISTS workspaces (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    repo_path    TEXT NOT NULL UNIQUE,
+    test_command TEXT,
+    color        TEXT NOT NULL DEFAULT 'sky',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+-- Brain tasks (Phase 3): the request, triage, questions and the plan, as JSON.
+CREATE TABLE IF NOT EXISTS brain_tasks (
+    id         TEXT PRIMARY KEY,
+    repo_path  TEXT NOT NULL,
+    data_json  TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 # Columns added after the first version. A tiny "migration": on startup, any
@@ -88,6 +111,14 @@ ADDED_COLUMNS = {
     "kind": "TEXT NOT NULL DEFAULT 'task'",
     "app_id": "TEXT",
     "label": "TEXT",
+    "workspace_id": "TEXT",
+    "origin": "TEXT NOT NULL DEFAULT 'manual'",
+    "brain_task_id": "TEXT",
+}
+
+# Same idea for Brain tasks.
+ADDED_BRAIN_COLUMNS = {
+    "workspace_id": "TEXT",
 }
 
 # Same idea for the apps table.
@@ -98,7 +129,7 @@ ADDED_APP_COLUMNS = {
 # Only these fields may be changed by update_run (protects against SQL injection).
 _UPDATABLE = {
     "state", "branch", "worktree_path", "base_commit", "session_id",
-    "result", "metrics", "outcome", "model", "effort", "agent_id",
+    "result", "metrics", "outcome", "model", "effort", "agent_id", "workspace_id", "origin",
 }
 
 
@@ -125,6 +156,10 @@ class Database:
             for column, sql_type in ADDED_APP_COLUMNS.items():
                 if column not in app_columns:
                     self.conn.execute(f"ALTER TABLE apps ADD COLUMN {column} {sql_type}")
+            brain_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(brain_tasks)")}
+            for column, sql_type in ADDED_BRAIN_COLUMNS.items():
+                if column not in brain_columns:
+                    self.conn.execute(f"ALTER TABLE brain_tasks ADD COLUMN {column} {sql_type}")
 
     def close(self) -> None:
         self.conn.close()
@@ -135,11 +170,13 @@ class Database:
         with self.conn:
             self.conn.execute(
                 "INSERT INTO runs (id, agent_id, repo_path, prompt, state, branch, worktree_path,"
-                " created_at, base_commit, supervised, test_command, model, effort, kind, app_id, label)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " created_at, base_commit, supervised, test_command, model, effort, kind, app_id, label,"
+                " workspace_id, origin, brain_task_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (run.id, run.agent_id, run.repo_path, run.prompt, run.state, run.branch,
                  run.worktree_path, run.created_at, run.base_commit, int(run.supervised),
-                 run.test_command, run.model, run.effort, run.kind, run.app_id, run.label),
+                 run.test_command, run.model, run.effort, run.kind, run.app_id, run.label,
+                 run.workspace_id, run.origin, run.brain_task_id),
             )
 
     def update_run(self, run_id: str, **fields) -> None:
@@ -159,15 +196,17 @@ class Database:
         row = self.conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         return _row_to_run(row) if row else None
 
-    def list_runs(self, limit: int = 50, kind: str | None = "task", app_id: str | None = None) -> list[RunInfo]:
-        """Newest first. Manual mode lists kind="task"; an app lists its own runs."""
+    def list_runs(self, limit: int = 50, kind: str | None = "task", app_id: str | None = None,
+                  workspace_id: str | None = None, origin: str | None = None,
+                  brain_task_id: str | None = None) -> list[RunInfo]:
+        """Newest first. Manual mode lists kind="task", origin="manual" in one
+        workspace; a Brain task lists its own runs; an app lists its own runs."""
         where, args = [], []
-        if kind:
-            where.append("kind = ?")
-            args.append(kind)
-        if app_id:
-            where.append("app_id = ?")
-            args.append(app_id)
+        for column, value in (("kind", kind), ("app_id", app_id), ("workspace_id", workspace_id),
+                              ("origin", origin), ("brain_task_id", brain_task_id)):
+            if value:
+                where.append(f"{column} = ?")
+                args.append(value)
         sql = "SELECT * FROM runs" + (f" WHERE {' AND '.join(where)}" if where else "")
         rows = self.conn.execute(sql + " ORDER BY created_at DESC, rowid DESC LIMIT ?", (*args, limit)).fetchall()
         return [_row_to_run(r) for r in rows]
@@ -213,6 +252,87 @@ class Database:
         return hidden
 
     # ---------- settings ----------
+
+    # ---------- Brain tasks ----------
+
+    def save_brain_task(self, task: BrainTask) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO brain_tasks (id, repo_path, data_json, created_at, updated_at, workspace_id)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at,"
+                " workspace_id = excluded.workspace_id",
+                (task.id, task.repo_path, task.model_dump_json(), task.created_at, task.updated_at, task.workspace_id),
+            )
+
+    def get_brain_task(self, task_id: str) -> BrainTask | None:
+        row = self.conn.execute("SELECT data_json FROM brain_tasks WHERE id = ?", (task_id,)).fetchone()
+        return BrainTask.model_validate_json(row["data_json"]) if row else None
+
+    def list_brain_tasks(self, limit: int = 50, workspace_id: str | None = None) -> list[BrainTask]:
+        sql, args = "SELECT data_json FROM brain_tasks", []
+        if workspace_id:
+            sql += " WHERE workspace_id = ?"
+            args.append(workspace_id)
+        rows = self.conn.execute(sql + " ORDER BY created_at DESC LIMIT ?", (*args, limit)).fetchall()
+        return [BrainTask.model_validate_json(r["data_json"]) for r in rows]
+
+    # ---------- workspaces ----------
+
+    def insert_workspace(self, ws: Workspace) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO workspaces (id, name, repo_path, test_command, color, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ws.id, ws.name, ws.repo_path, ws.test_command, ws.color, ws.created_at, ws.updated_at),
+            )
+
+    def update_workspace(self, ws: Workspace) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE workspaces SET name = ?, test_command = ?, color = ?, updated_at = ? WHERE id = ?",
+                (ws.name, ws.test_command, ws.color, now_iso(), ws.id),
+            )
+
+    def get_workspace(self, ws_id: str) -> Workspace | None:
+        row = self.conn.execute("SELECT * FROM workspaces WHERE id = ?", (ws_id,)).fetchone()
+        return self._with_stats(row) if row else None
+
+    def get_workspace_by_repo(self, repo_path: str) -> Workspace | None:
+        row = self.conn.execute("SELECT * FROM workspaces WHERE repo_path = ?", (repo_path,)).fetchone()
+        return self._with_stats(row) if row else None
+
+    def list_workspaces(self) -> list[Workspace]:
+        rows = self.conn.execute("SELECT * FROM workspaces").fetchall()
+        found = [self._with_stats(r) for r in rows]
+        return sorted(found, key=lambda w: w.last_activity or w.created_at, reverse=True)
+
+    def delete_workspace(self, ws_id: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM workspaces WHERE id = ?", (ws_id,))
+
+    def _with_stats(self, row: sqlite3.Row) -> Workspace:
+        manual = self.conn.execute(
+            "SELECT COUNT(*) AS n, MAX(created_at) AS last FROM runs WHERE workspace_id = ? AND kind = 'task'"
+            " AND origin = 'manual'", (row["id"],)).fetchone()
+        brain = self.conn.execute(
+            "SELECT COUNT(*) AS n, MAX(updated_at) AS last FROM brain_tasks WHERE workspace_id = ?",
+            (row["id"],)).fetchone()
+        last = max([x for x in (manual["last"], brain["last"]) if x], default=None)
+        return Workspace(id=row["id"], name=row["name"], repo_path=row["repo_path"], test_command=row["test_command"],
+                         color=row["color"] or "sky", created_at=row["created_at"], updated_at=row["updated_at"],
+                         manual_count=manual["n"], brain_count=brain["n"], last_activity=last)
+
+    def chats_without_workspace(self) -> list[tuple[str, str, str]]:
+        """(kind, id, repo_path) of Manual runs and Brain tasks made before workspaces existed."""
+        runs = self.conn.execute(
+            "SELECT id, repo_path FROM runs WHERE kind = 'task' AND workspace_id IS NULL").fetchall()
+        tasks = self.conn.execute("SELECT id, repo_path FROM brain_tasks WHERE workspace_id IS NULL").fetchall()
+        return [("run", r["id"], r["repo_path"]) for r in runs] + [("brain", t["id"], t["repo_path"]) for t in tasks]
+
+    def delete_brain_task(self, task_id: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM brain_tasks WHERE id = ?", (task_id,))
 
     def get_setting(self, key: str, default=None):
         row = self.conn.execute("SELECT value_json FROM settings WHERE key = ?", (key,)).fetchone()
@@ -298,6 +418,7 @@ def _row_to_run(row: sqlite3.Row) -> RunInfo:
         metrics=RunMetrics.model_validate_json(row["metrics_json"]) if row["metrics_json"] else None,
         outcome=row["outcome"], model=row["model"], effort=row["effort"],
         kind=row["kind"] or "task", app_id=row["app_id"], label=row["label"],
+        workspace_id=row["workspace_id"], origin=row["origin"] or "manual", brain_task_id=row["brain_task_id"],
     )
 
 

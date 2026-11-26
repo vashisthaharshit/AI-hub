@@ -9,8 +9,9 @@
 
 import { useEffect, useState } from "react";
 import { api, errorText } from "../api/client";
-import type { AgentStatus, SettingsView, SummaryProvider, SummarySettings, SummaryTest } from "../api/types";
+import type { AgentStatus, BrainMode, SettingsView, SummaryProvider, SummarySettings, SummaryTest } from "../api/types";
 import { isUsable } from "../hooks/useAgents";
+import { MODES } from "./brain/BrainNewTask";
 import { ModelPicker } from "./ModelSelect";
 
 const PROVIDERS: { id: SummaryProvider; title: string; text: string }[] = [
@@ -258,6 +259,57 @@ export function SettingsPage({ agents }: { agents: AgentStatus[] }) {
           <span className="text-xs text-zinc-500">Test summarizes a tiny example, so you know it works.</span>
         )}
       </div>
+
+      <BrainDefaults />
     </div>
+  );
+}
+
+// Brain: the default Cost vs quality for new tasks (each task can change it).
+function BrainDefaults() {
+  const [mode, setMode] = useState<BrainMode | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.brainSettings().then((s) => setMode(s.mode)).catch((e) => setError(errorText(e)));
+  }, []);
+
+  async function pick(next: BrainMode) {
+    setMode(next);
+    setSaved(false);
+    setError(null);
+    try {
+      await api.saveBrainSettings({ mode: next });
+      setSaved(true);
+    } catch (e) {
+      setError(errorText(e));
+    }
+  }
+
+  return (
+    <section className="mt-6 space-y-3 border-t border-zinc-800 pt-6">
+      <div>
+        <h3 className="text-base font-semibold">Brain: cost vs quality</h3>
+        <p className="mt-1 text-sm text-zinc-400">
+          The default for new Brain tasks. It decides which model size each step gets; you can change it on any task.
+        </p>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-3">
+        {MODES.map((m) => (
+          <button
+            key={m.id}
+            onClick={() => pick(m.id)}
+            disabled={mode === null}
+            className={`rounded-md border px-3 py-2.5 text-left ${mode === m.id ? "border-sky-600 bg-sky-500/5" : "border-zinc-800 hover:border-zinc-700"}`}
+          >
+            <span className="block text-sm font-medium">{m.label}</span>
+            <span className="block text-xs text-zinc-500">{m.text}</span>
+          </button>
+        ))}
+      </div>
+      {saved && <p className="text-xs text-emerald-400">Saved</p>}
+      {error && <p className="text-sm text-red-300">{error}</p>}
+    </section>
   );
 }

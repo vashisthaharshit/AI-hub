@@ -43,6 +43,19 @@ Endpoints
   POST /api/apps/{id}/open             open a file of the app {path, reveal}
   GET  /api/apps/{id}/setup            the setup form (keys, config files, connections) + current answers
   PUT  /api/apps/{id}/setup            save answers {values, confirm_unsafe}; writes config files / .mcp.json
+  GET  /api/workspaces                 workspaces (one per repo) with chat counts, latest first
+  POST /api/workspaces                 {repo_path, name?, test_command?}: create (or return the existing one)
+  GET/PATCH/DELETE /api/workspaces/{id}  rename, test command, color; delete only when empty
+  GET  /api/runs?workspace_id=&brain_task_id=  Manual's runs in a workspace, or a Brain task's runs
+  POST /api/runs/{id}/move-to-manual   show a Brain task's run in Manual too
+  GET  /api/brain/tasks?workspace_id=  Brain tasks (newest first)
+  POST /api/brain/tasks                {repo_path, request, ...}: triage, then plan if it's big
+  GET  /api/brain/tasks/{id}           one task with its plan
+  POST /api/brain/tasks/{id}/plan      {answers} or {skip_questions}: (re)plan
+  PATCH /api/brain/tasks/{id}          {steps, mode, approval, reroute}: the user's edits (checked + routed again)
+  GET/PUT /api/settings/brain          {mode}: the default Cost vs quality for new tasks
+  POST /api/brain/tasks/{id}/direct    "Just do it": no plan, one agent
+  DELETE /api/brain/tasks/{id}
   GET  /api/apps/{id}/tools            look again for the tools the app needs (fresh, not cached)
   POST /api/tools/{tool}/install       install a tool with winget (one at a time)
   GET  /api/tools/installs/{job}?after=-1  install progress + new log lines (poll this)
@@ -60,25 +73,27 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from aihub import config, folder_picker, worktree
+from aihub import config, folder_picker, workspaces, worktree
 from aihub.apps import connect as apps
 from aihub.apps import files as app_files
 from aihub.apps import running as app_running
 from aihub.apps import tools
 from aihub.apps import update as app_update
+from aihub.brain.tasks import Brain, BrainError
 from aihub.apps.guide import GuideError, Guides
 from aihub.apps.setup_values import SetupError, SetupValues
 from aihub.agents.registry import default_registry
 from aihub.db import Database
 from aihub.models import (
     AgentStatus, AppConnect, AppGuide, AppInfo, AppRequirement, AppRunCreate, AppTrust, AppUpdateCheck,
-    AppUpdateResult, OpenPath, SetupSave,
+    AppUpdateResult, BrainCreate, BrainPlanRequest, BrainSettings, BrainTask, BrainTaskEdit, OpenPath, SetupSave,
     SetupView, ApprovalDecision, InstallJob, ApprovalRequest, BulkDelete, ChangedFile, FollowUp, KeyUpdate, RunCreate,
-    RunInfo, SettingsView, SummarySettings, SummaryTest, UsageWindow,
+    RunInfo, SettingsView, SummarySettings, SummaryTest, UsageWindow, Workspace, WorkspaceCreate, WorkspaceEdit,
 )
 from aihub.runner import RunError, RunManager
 from aihub.secrets_store import UnavailableStore, default_store
 from aihub.summarizer import HTTP_PROVIDERS, Summarizer, SummaryError
+from aihub.workspaces import WorkspaceError
 
 
 @asynccontextmanager
@@ -97,6 +112,8 @@ async def lifespan(app: FastAPI):
     app.state.installer = tools.Installer()
     app.state.guides = Guides(db, app.state.summarizer, app.state.registry)
     app.state.setup_values = SetupValues(db, app.state.secrets)
+    app.state.brain = Brain(db, app.state.summarizer, app.state.registry)
+    workspaces.adopt_orphans(db)   # chats made before workspaces existed
     yield
     # ...and once at shutdown: stop running agents, close the database.
     await app.state.runs.shutdown()
@@ -135,7 +152,7 @@ async def _call(coro):
     except KeyError as exc:
         raise HTTPException(404, exc.args[0] if exc.args else "Not found") from None
     except (RunError, worktree.GitError, apps.AppError, tools.InstallError, GuideError, app_files.UploadError, folder_picker.PickerError, SetupError,
-            app_running.AppRunError) as exc:
+            app_running.AppRunError, BrainError, WorkspaceError) as exc:
         raise HTTPException(400, str(exc)) from None
 
 
@@ -172,8 +189,57 @@ async def unhide_models(agent_id: str):
 # ---------- runs ----------
 
 @app.get("/api/runs", response_model=list[RunInfo])
-async def list_runs(limit: int = 50):
-    return app.state.db.list_runs(limit)  # Manual mode only; app runs are listed per app
+async def list_runs(limit: int = 50, workspace_id: str | None = None, brain_task_id: str | None = None):
+    """Manual's list (runs started in Manual, or moved there), or one Brain task's runs.
+    App runs are listed per app."""
+    if brain_task_id:
+        return app.state.db.list_runs(limit, brain_task_id=brain_task_id)
+    return app.state.db.list_runs(limit, workspace_id=workspace_id, origin="manual")
+
+
+@app.post("/api/runs/{run_id}/move-to-manual", response_model=RunInfo)
+async def move_run_to_manual(run_id: str):
+    """A run started by a Brain task now also shows in Manual (where you can keep chatting)."""
+    run = app.state.db.get_run(run_id)
+    if not run:
+        raise HTTPException(404, f"Run '{run_id}' not found")
+    app.state.db.update_run(run_id, origin="manual")
+    return app.state.db.get_run(run_id)
+
+
+# ---------- workspaces ----------
+
+@app.get("/api/workspaces", response_model=list[Workspace])
+async def list_workspaces():
+    return app.state.db.list_workspaces()
+
+
+@app.post("/api/workspaces", response_model=Workspace, status_code=201)
+async def create_workspace(body: WorkspaceCreate):
+    """The repo folder must be a Git repo. An existing workspace for it is returned as-is."""
+    return await _call(workspaces.create(app.state.db, body))
+
+
+@app.get("/api/workspaces/{ws_id}", response_model=Workspace)
+async def get_workspace(ws_id: str):
+    async def do():
+        return workspaces.get(app.state.db, ws_id)
+    return await _call(do())
+
+
+@app.patch("/api/workspaces/{ws_id}", response_model=Workspace)
+async def edit_workspace(ws_id: str, body: WorkspaceEdit):
+    async def do():
+        return workspaces.edit(app.state.db, ws_id, body)
+    return await _call(do())
+
+
+@app.delete("/api/workspaces/{ws_id}")
+async def delete_workspace(ws_id: str):
+    async def do():
+        workspaces.delete(app.state.db, ws_id)
+        return {"deleted": True}
+    return await _call(do())
 
 
 @app.post("/api/runs", response_model=RunInfo, status_code=201)
@@ -289,6 +355,60 @@ async def provider_models(provider: str):
         return {"models": await app.state.summarizer.list_models(provider)}
     except SummaryError as exc:
         raise HTTPException(400, str(exc)) from None
+
+
+# ---------- Brain ----------
+
+@app.get("/api/settings/brain", response_model=BrainSettings)
+async def brain_settings():
+    return app.state.brain.settings()
+
+
+@app.put("/api/settings/brain", response_model=BrainSettings)
+async def save_brain_settings(body: BrainSettings):
+    return app.state.brain.save_settings(body)
+
+
+@app.get("/api/brain/tasks", response_model=list[BrainTask])
+async def list_brain_tasks(limit: int = 50, workspace_id: str | None = None):
+    return app.state.db.list_brain_tasks(limit, workspace_id)
+
+
+@app.post("/api/brain/tasks", response_model=BrainTask, status_code=201)
+async def create_brain_task(req: BrainCreate):
+    """Can take 10-40 seconds when the task is big: the planner writes the plan."""
+    return await _call(app.state.brain.create(req))
+
+
+@app.get("/api/brain/tasks/{task_id}", response_model=BrainTask)
+async def get_brain_task(task_id: str):
+    async def do():
+        return app.state.brain.get(task_id)
+    return await _call(do())
+
+
+@app.post("/api/brain/tasks/{task_id}/plan", response_model=BrainTask)
+async def plan_brain_task(task_id: str, body: BrainPlanRequest):
+    return await _call(app.state.brain.plan(task_id, body))
+
+
+@app.patch("/api/brain/tasks/{task_id}", response_model=BrainTask)
+async def edit_brain_task(task_id: str, body: BrainTaskEdit):
+    return await _call(app.state.brain.edit(task_id, body))
+
+
+@app.post("/api/brain/tasks/{task_id}/direct", response_model=BrainTask)
+async def brain_task_direct(task_id: str):
+    return await _call(app.state.brain.run_directly(task_id))
+
+
+@app.delete("/api/brain/tasks/{task_id}")
+async def delete_brain_task(task_id: str):
+    async def do():
+        app.state.brain.get(task_id)
+        app.state.db.delete_brain_task(task_id)
+        return {"deleted": True}
+    return await _call(do())
 
 
 # ---------- apps ----------

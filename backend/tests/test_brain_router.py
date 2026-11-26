@@ -1,0 +1,118 @@
+"""Brain step 2: the router picks an agent, model and effort for each step."""
+
+from aihub.brain import planner, router
+from aihub.models import (
+    AccountInfo, AgentStatus, BrainPlan, ModelOption, PlanStep, StepAssignment, UsageWindow,
+)
+
+EFFORTS = ["low", "medium", "high", "xhigh"]
+
+
+def claude(used=None, hidden=()):
+    return AgentStatus(
+        id="claude-code", name="Claude Code", state="ready", hidden_models=list(hidden),
+        models=[ModelOption(id="haiku", label="Haiku", efforts=EFFORTS), ModelOption(id="sonnet", label="Sonnet", efforts=EFFORTS),
+                ModelOption(id="opus", label="Opus", efforts=EFFORTS)],
+        account=AccountInfo(usage=[UsageWindow(label="5-hour limit", used_percent=used)]) if used is not None else None,
+    )
+
+
+def codex(used=None, state="ready"):
+    return AgentStatus(
+        id="codex", name="Codex", state=state,
+        models=[ModelOption(id="gpt-5.1-codex-mini", label="GPT-5.1-Codex-Mini", efforts=EFFORTS),
+                ModelOption(id="gpt-5.1-codex", label="GPT-5.1-Codex", efforts=EFFORTS),
+                ModelOption(id="gpt-5.1-codex-max", label="GPT-5.1-Codex-Max", efforts=EFFORTS)],
+        account=AccountInfo(usage=[UsageWindow(label="Weekly limit", used_percent=used)]) if used is not None else None,
+    )
+
+
+def step(sid, difficulty="medium", files=(), deps=(), kind="build"):
+    return PlanStep(id=sid, title=sid, type=kind, difficulty=difficulty, files=list(files), depends_on=list(deps),
+                    brief="b", done_when="d")
+
+
+def plan(*steps) -> BrainPlan:
+    return planner.build_plan(list(steps))
+
+
+def models(p: BrainPlan) -> dict[str, str]:
+    return {s.id: s.assignment.model for s in p.steps}
+
+
+def test_tiers_by_name():
+    assert [router.tier_of(m) for m in claude().models] == ["small", "medium", "strong"]
+    assert [router.tier_of(m) for m in codex().models] == ["small", "medium", "strong"]
+
+
+def test_mode_table():
+    def pick(mode):
+        p = plan(step("e", "easy", ["a"]), step("m", "medium", ["b"]), step("h", "hard", ["c"]))
+        router.route(p, [claude()], mode)
+        return [models(p)[x] for x in ("e", "m", "h")]
+    assert pick("cheapest") == ["haiku", "haiku", "sonnet"]
+    assert pick("balanced") == ["haiku", "sonnet", "opus"]
+    assert pick("best") == ["sonnet", "opus", "opus"]
+
+
+def test_effort():
+    p = plan(step("e", "easy", ["a"]), step("m", "medium", ["b"]), step("h", "hard", ["c"]))
+    router.route(p, [claude()], "balanced")
+    by = {s.id: s.assignment.effort for s in p.steps}
+    assert (by["e"], by["m"], by["h"]) == ("low", None, "high")
+    router.route(p, [claude()], "best")
+    assert {s.id: s.assignment.effort for s in p.steps}["h"] == "xhigh"
+
+
+def test_review_is_never_small():
+    p = plan(step("e", "easy", ["a"]))
+    router.route(p, [claude()], "cheapest")
+    review = p.steps[-1]
+    assert review.type == "review" and review.assignment.model == "sonnet"
+
+
+def test_parallel_steps_are_spread_across_agents():
+    p = plan(step("a", files=["x"]), step("b", files=["y"]))
+    router.route(p, [claude(), codex()], "balanced")
+    a, b, review = p.steps
+    assert {a.assignment.agent_id, b.assignment.agent_id} == {"claude-code", "codex"}
+    assert "spread out" in b.assignment.reason
+
+
+def test_review_by_a_different_agent():
+    p = plan(step("a", files=["x"]), step("b", files=["x"]))   # b waits for a: one wave each
+    router.route(p, [claude(), codex()], "balanced")
+    a, b, review = p.steps
+    assert a.assignment.agent_id == b.assignment.agent_id == "claude-code"
+    assert review.assignment.agent_id == "codex" and "different agent" in review.assignment.reason
+
+
+def test_agent_near_its_limit_is_avoided():
+    p = plan(step("a", files=["x"]))
+    router.route(p, [claude(used=95), codex(used=10)], "balanced")
+    assert p.steps[0].assignment.agent_id == "codex"
+    assert "near its usage limit" in p.steps[0].assignment.reason
+
+
+def test_used_up_agent_only_when_nothing_else():
+    p = plan(step("a", files=["x"]))
+    router.route(p, [claude(used=100)], "balanced")
+    assert p.steps[0].assignment.agent_id == "claude-code" and "nothing else fits" in p.steps[0].assignment.reason
+
+
+def test_hidden_models_and_missing_agents():
+    p = plan(step("h", "hard", ["x"]))
+    router.route(p, [claude(hidden=["opus"]), codex(state="not_installed")], "balanced")
+    h = p.steps[0].assignment
+    assert h.agent_id == "claude-code" and h.model == "sonnet" and "closest one" in h.reason
+    assert router.route(plan(step("a")), [codex(state="not_signed_in")], "balanced")  # a note: no agent
+
+
+def test_user_choice_wins_while_usable():
+    p = plan(step("a", "easy", ["x"]))
+    p.steps[0].assignment = StepAssignment(agent_id="codex", agent_name="Codex", model="gpt-5.1-codex-max",
+                                           model_label="Max", reason="mine", manual=True)
+    assert router.route(p, [claude(), codex()], "cheapest") == []
+    assert p.steps[0].assignment.model == "gpt-5.1-codex-max"
+    notes = router.route(p, [claude()], "cheapest")               # Codex is gone now
+    assert notes and p.steps[0].assignment.agent_id == "claude-code" and not p.steps[0].assignment.manual

@@ -350,7 +350,7 @@ async def pick_writer(summarizer: Summarizer, registry: AgentRegistry,
         return chosen
     agents = await registry.scan(False, hidden or {})
     usable = [a for a in agents if a.state in ("ready", "installed")]
-    usable.sort(key=lambda a: a.id != "claude")  # Claude Code first: Haiku is cheap and good at this
+    usable.sort(key=lambda a: a.id != "claude-code")  # Claude Code first: Haiku is cheap and good at this
     return cheapest_settings(usable[0]) if usable else None
 
 

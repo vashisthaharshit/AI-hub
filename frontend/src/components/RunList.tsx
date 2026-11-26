@@ -8,9 +8,11 @@ import { useEffect, useState } from "react";
 import { api, errorText } from "../api/client";
 import type { RunInfo } from "../api/types";
 import { timeAgo } from "../lib/events";
+import { agentColor } from "../lib/theme";
 import { StatusBadge } from "./StatusBadge";
 
 interface Props {
+  workspaceId: string; // only this workspace's Manual chats (Brain's runs stay in Brain)
   selectedId: string | null;
   refreshKey: number;
   onSelect: (id: string) => void;
@@ -20,7 +22,7 @@ interface Props {
 const POLL_MS = 5000;
 const isBusy = (run: RunInfo) => run.state === "running" || run.state === "pending";
 
-export function RunList({ selectedId, refreshKey, onSelect, onDeleted }: Props) {
+export function RunList({ workspaceId, selectedId, refreshKey, onSelect, onDeleted }: Props) {
   const [runs, setRuns] = useState<RunInfo[]>([]);
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -33,7 +35,7 @@ export function RunList({ selectedId, refreshKey, onSelect, onDeleted }: Props) 
     let active = true;
     const load = () =>
       api
-        .runs()
+        .runs({ workspaceId })
         .then((r) => active && setRuns(r))
         .catch(() => {
           /* the Agents panel already shows backend errors */
@@ -44,7 +46,7 @@ export function RunList({ selectedId, refreshKey, onSelect, onDeleted }: Props) 
       active = false;
       clearInterval(timer);
     };
-  }, [refreshKey, reload]);
+  }, [refreshKey, reload, workspaceId]);
 
   const selectable = runs.filter((r) => !isBusy(r));
   const allChecked = selectable.length > 0 && selectable.every((r) => checked.has(r.id));
@@ -85,7 +87,7 @@ export function RunList({ selectedId, refreshKey, onSelect, onDeleted }: Props) 
   return (
     <section className="flex min-h-0 flex-1 flex-col px-3 py-3">
       <div className="mb-2 flex items-center justify-between gap-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Runs</h2>
+        <h2 className="sidebar-heading mb-0">Manual chats</h2>
         <div className="flex items-center gap-2">
           {runs.length > 0 && (
             <button
@@ -142,7 +144,9 @@ export function RunList({ selectedId, refreshKey, onSelect, onDeleted }: Props) 
       )}
 
       {message && <p className="mb-2 rounded bg-red-500/10 px-2 py-1 text-xs text-red-300">{message}</p>}
-      {runs.length === 0 && <p className="history-empty">No runs yet.</p>}
+      {runs.length === 0 && (
+        <p className="history-empty">No chats yet. Start one with New chat: pick an agent and say what you want.</p>
+      )}
 
       <ul className="-mx-1 min-h-0 flex-1 space-y-1 overflow-y-auto">
         {runs.map((run) => (
@@ -161,14 +165,16 @@ export function RunList({ selectedId, refreshKey, onSelect, onDeleted }: Props) 
             <button
               aria-current={run.id === selectedId ? "page" : undefined}
               onClick={() => (selecting && !isBusy(run) ? toggle(run.id) : onSelect(run.id))}
-              className={`min-w-0 flex-1 rounded-md px-2 py-1.5 text-left hover:bg-zinc-800 ${
-                run.id === selectedId ? "bg-zinc-800" : ""
-              }`}
+              className="chat-item min-w-0 flex-1"
             >
               <p className="truncate text-sm">{run.prompt}</p>
               <div className="mt-0.5 flex items-center gap-2 text-[11px] text-zinc-500">
                 <StatusBadge state={run.state} />
-                <span>{run.agent_id}</span>
+                <span className="flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full" style={{ background: agentColor(run.agent_id) }} />
+                  {run.agent_id === "claude-code" ? "Claude" : run.agent_id === "codex" ? "Codex" : run.agent_id}
+                </span>
+                {run.brain_task_id && <span className="text-sky-300" title="Started by a Brain task">Brain</span>}
                 {run.outcome && <span className={run.outcome === "kept" ? "text-emerald-400" : ""}>{run.outcome}</span>}
                 <span>{timeAgo(run.created_at)}</span>
               </div>
