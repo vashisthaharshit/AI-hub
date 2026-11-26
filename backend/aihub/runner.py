@@ -10,6 +10,16 @@ Flow of one turn:
   3. for every event: save it to SQLite, then push it to every open WebSocket
   4. at the end: measure the result (files changed, tests) and save the state
 
+App runs (Apps tab) are the same, with three differences:
+  - they work IN the app's folder, not a worktree: an app's data (a
+    profile, a trade log) must stay in one place. So no keep / discard,
+    and git is never run on that folder by delete
+  - after a turn: which files it created or changed (an "outputs" event),
+    instead of diff checks
+  - approvals follow the app's policy: "trusted" apps get an automatic yes,
+    EXCEPT tools that move money (always the user), and a money command
+    asks for everything
+
 Also here:
   - approvals (supervised mode): the agent's request waits on a Future
     until the user clicks Allow / Deny
@@ -25,13 +35,14 @@ import asyncio
 import re
 import secrets
 from collections import defaultdict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from aihub import checks, config, handoff, worktree
+from aihub.apps import running
 from aihub.agents.base import AgentAdapter, RunOptions
 from aihub.agents.registry import AgentRegistry
 from aihub.db import Database, now_iso
@@ -65,10 +76,15 @@ class _PendingApproval:
 
 
 class RunManager:
-    def __init__(self, db: Database, registry: AgentRegistry, summarizer: Summarizer | None = None):
+    def __init__(self, db: Database, registry: AgentRegistry, summarizer: Summarizer | None = None,
+                 app_context: Callable[[RunInfo], running.AppRunContext] | None = None):
         self.db = db
         self.registry = registry
         self.summarizer = summarizer  # optional: writes LLM summaries for handoffs
+        # App runs: gives a run its app's settings, plugin folders and approval
+        # policy (built fresh every turn, so changed settings apply).
+        self.app_context = app_context
+        self._policies: dict[str, running.AppRunContext] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._subscribers: dict[str, set[asyncio.Queue]] = defaultdict(set)
         self._next_seq: dict[str, int] = {}
@@ -99,6 +115,22 @@ class RunManager:
         self.db.update_run(run_id, branch=branch, worktree_path=str(path), state="running")
         self._launch(run_id, adapter, req.prompt, path, resume=None,
                      model=req.model or None, effort=req.effort or None)
+        return self.db.get_run(run_id)
+
+    async def start_app(self, app_id: str, app_path: str, adapter: AgentAdapter, prompt: str, label: str,
+                        model: str | None = None, effort: str | None = None) -> RunInfo:
+        """Run an app's command in the app's own folder (no worktree)."""
+        busy = [r for r in self.db.list_runs(50, kind="app", app_id=app_id) if self.is_active(r.id)]
+        if busy:
+            raise RunError("This app is already running something. Wait for it, or stop it first.")
+        run_id = uuid4().hex[:12]
+        self.db.insert_run(RunInfo(
+            id=run_id, agent_id=adapter.id, repo_path=app_path, prompt=prompt, state="running",
+            created_at=now_iso(), worktree_path=app_path, kind="app", app_id=app_id, label=label,
+            # With approvals whenever the agent can pause for them (Claude Code).
+            supervised=adapter.supports_supervised, model=model or None, effort=effort or None,
+        ))
+        self._launch(run_id, adapter, prompt, Path(app_path), resume=None, model=model or None, effort=effort or None)
         return self.db.get_run(run_id)
 
     async def follow_up(self, run_id: str, prompt: str, model: str | None = None,
@@ -214,6 +246,14 @@ class RunManager:
                        handoff_from: RunInfo | None = None) -> None:
         run = self.db.get_run(run_id)
         options = RunOptions(resume_session_id=resume, model=model, effort=effort)
+        before = None
+        if run.kind == "app":
+            ctx = self.app_context(run) if self.app_context else running.AppRunContext()
+            self._policies[run_id] = ctx
+            options.extra_env = ctx.extra_env
+            options.plugin_dirs = ctx.plugin_dirs
+            options.accept_edits = True
+            before = await asyncio.to_thread(running.snapshot, path)
         if run.supervised:
             token = secrets.token_urlsafe(24)
             self._tokens[run_id] = token
@@ -251,6 +291,7 @@ class RunManager:
             self._record(run_id, AgentEvent(kind="error", data={"message": f"AI-Hub error: {exc}"}))
         finally:
             self._tokens.pop(run_id, None)
+            self._policies.pop(run_id, None)
             self._deny_pending(run_id, "The run ended.")
             if state == "failed" and model:
                 failed_summary = result.summary if result and not result.success and result.summary else ""
@@ -262,7 +303,13 @@ class RunManager:
                                    "It's now hidden from the model list (Agents panel → show hidden models).",
                     }))
             metrics = None
-            if state != "cancelled":
+            if run.kind == "app" and before is not None:
+                try:  # what the turn made: listed even if it was cancelled
+                    after = await asyncio.to_thread(running.snapshot, path)
+                    self._record(run_id, AgentEvent(kind="outputs", data=running.diff(before, after)))
+                except Exception as exc:  # noqa: BLE001
+                    self._record(run_id, AgentEvent(kind="error", data={"message": f"Couldn't list new files: {exc}"}))
+            elif state != "cancelled":
                 try:
                     metrics = await checks.measure(path, run.base_commit or "HEAD", run.test_command)
                     self._record(run_id, AgentEvent(kind="checks", data=metrics.model_dump()))
@@ -296,11 +343,20 @@ class RunManager:
         if not expected or not secrets.compare_digest(expected, req.token):
             raise PermissionError("Invalid approval token")
 
+        # App runs: a trusted app gets an automatic yes, but never for money.
+        policy = self._policies.get(req.run_id)
+        money = bool(policy) and running.is_money_tool(req.tool_name, policy.always_ask)
+        if policy and policy.trusted and not policy.ask_everything and not money:
+            self._record(req.run_id, AgentEvent(kind="approval_resolved", data={
+                "id": None, "behavior": "allow", "message": None, "auto": True, "tool_name": req.tool_name,
+            }))
+            return {"behavior": "allow", "message": None}
+
         approval_id = uuid4().hex[:8]
         future = asyncio.get_running_loop().create_future()
         self._approvals[approval_id] = _PendingApproval(req.run_id, future)
         self._record(req.run_id, AgentEvent(kind="approval_request", data={
-            "id": approval_id, "tool_name": req.tool_name, "input": req.input,
+            "id": approval_id, "tool_name": req.tool_name, "input": req.input, "money": money,
         }))
         try:
             decision: ApprovalDecision = await future
@@ -329,6 +385,8 @@ class RunManager:
 
     async def changed_files(self, run_id: str) -> list[ChangedFile]:
         run = self._require_run(run_id)
+        if run.kind == "app":
+            return []  # app runs list their files in an "outputs" event
         base = run.base_commit or "HEAD"
         if run.outcome == "kept":
             # The worktree folder is gone; compare the base commit with the kept branch.
@@ -341,6 +399,7 @@ class RunManager:
         """Commit the work to the run's branch and remove the worktree folder.
         The branch stays, so the user can merge it: git merge aihub/run-<id>"""
         run = self._require_idle(run_id)
+        self._no_git_for_apps(run)
         first_line = (run.prompt.strip().splitlines() or ["changes"])[0][:72]
         await worktree.commit_all(Path(run.worktree_path), f"AI-Hub: {first_line}\n\nRun {run.id} by {run.agent_id}")
         await worktree.remove_worktree(Path(run.repo_path), Path(run.worktree_path))
@@ -350,6 +409,7 @@ class RunManager:
     async def discard(self, run_id: str) -> RunInfo:
         """Delete the worktree folder AND the branch. The work is gone."""
         run = self._require_idle(run_id)
+        self._no_git_for_apps(run)
         repo = Path(run.repo_path)
         await worktree.remove_worktree(repo, Path(run.worktree_path))
         if run.branch:
@@ -367,6 +427,11 @@ class RunManager:
         if self.is_active(run_id):
             raise RunError("The run is still working. Cancel it first.")
         repo = Path(run.repo_path)
+        if run.kind == "app":
+            # Only the history goes. The app's folder is the user's: never touched.
+            self.db.delete_run(run_id)
+            self._next_seq.pop(run_id, None)
+            return
         if run.outcome is None and repo.is_dir():
             if run.worktree_path and Path(run.worktree_path).exists():
                 await worktree.remove_worktree(repo, Path(run.worktree_path))
@@ -389,6 +454,11 @@ class RunManager:
             except (KeyError, RunError, worktree.GitError) as exc:
                 failed.append({"id": run_id, "error": exc.args[0] if exc.args else str(exc)})
         return deleted, failed
+
+    @staticmethod
+    def _no_git_for_apps(run: RunInfo) -> None:
+        if run.kind == "app":
+            raise RunError("App runs work directly in the app's folder; there is nothing to keep or discard.")
 
     def _require_run(self, run_id: str) -> RunInfo:
         run = self.db.get_run(run_id)

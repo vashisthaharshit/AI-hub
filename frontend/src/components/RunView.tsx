@@ -95,9 +95,9 @@ export function RunView({ runId, agents, onChanged, onDeleted }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <header className="border-b border-zinc-800 px-6 py-4">
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
-            <p className="line-clamp-2 text-base font-medium">{run?.prompt ?? "Loading..."}</p>
+            <h2 className="line-clamp-2 text-lg font-semibold break-words">{run?.prompt ?? "Loading..."}</h2>
             <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
               <StatusBadge state={state} />
               {run && <span>{agentNames[run.agent_id] ?? run.agent_id}</span>}
@@ -298,8 +298,8 @@ function FollowUpBox({ run, agents, onSend }: FollowUpProps) {
           there) and first gets a summary of this run, then your message.
         </p>
       )}
-      <div className="mx-auto flex max-w-3xl gap-2">
-        <div className="flex w-52 shrink-0 flex-col gap-1.5 self-end">
+      <div className="mx-auto flex max-w-3xl flex-wrap gap-2 sm:flex-nowrap">
+        <div className="flex w-full shrink-0 flex-col gap-1.5 self-end sm:w-52">
           {choices.length > 1 && (
             <select
               aria-label="Agent"

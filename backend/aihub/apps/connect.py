@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 from aihub import config
+from aihub.apps.install import install_skills
 from aihub.apps.manifest import build_manifest
 from aihub.db import Database, now_iso
 from aihub.models import AppConnect, AppInfo
@@ -130,6 +131,7 @@ async def connect(req: AppConnect, db: Database) -> AppInfo:
         raise AppError("Paste a GitHub link, or choose a folder that's already on this computer.")
 
     dest = dest.resolve()
+    install_skills(dest)   # loose SKILL.md folders -> .claude/skills (plugins load with --plugin-dir instead)
     manifest = build_manifest(dest)
 
     existing = db.get_app_by_path(str(dest))
@@ -150,5 +152,6 @@ def rescan(app_id: str, db: Database) -> AppInfo:
         raise KeyError(f"App '{app_id}' not found")
     if not Path(app.path).is_dir():
         raise AppError(f"The app's folder is gone: {app.path}")
+    install_skills(Path(app.path))   # refresh our copies (the repo may have changed)
     db.update_app_manifest(app_id, build_manifest(Path(app.path)))
     return db.get_app(app_id)

@@ -78,7 +78,7 @@ export function SettingsPage({ agents }: { agents: AgentStatus[] }) {
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-5 px-6 py-10">
       <div>
-        <h2 className="text-xl font-semibold">Settings</h2>
+        <h2 className="settings-title">Settings</h2>
         <p className="mt-1 text-sm text-zinc-400">
           <span className="font-medium text-zinc-200">Summary model</span>: writes the summary a new agent gets when you
           switch agents in the middle of a run.

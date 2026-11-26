@@ -108,7 +108,7 @@ class CodexAdapter(AgentAdapter):
         parser = CodexParser()
         start = time.monotonic()
         try:
-            async for line in stream_lines(self.build_command(path, options), workdir, prompt):
+            async for line in stream_lines(self.build_command(path, options), workdir, prompt, options.extra_env):
                 for event in parser.parse_line(line):
                     if event.kind == "result":
                         # Codex doesn't report duration; we measure it ourselves.

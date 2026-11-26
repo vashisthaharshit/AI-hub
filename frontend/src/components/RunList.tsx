@@ -14,14 +14,13 @@ interface Props {
   selectedId: string | null;
   refreshKey: number;
   onSelect: (id: string) => void;
-  onNew: () => void;
   onDeleted: (ids: string[]) => void;
 }
 
 const POLL_MS = 5000;
 const isBusy = (run: RunInfo) => run.state === "running" || run.state === "pending";
 
-export function RunList({ selectedId, refreshKey, onSelect, onNew, onDeleted }: Props) {
+export function RunList({ selectedId, refreshKey, onSelect, onDeleted }: Props) {
   const [runs, setRuns] = useState<RunInfo[]>([]);
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -96,9 +95,6 @@ export function RunList({ selectedId, refreshKey, onSelect, onNew, onDeleted }: 
               {selecting ? "Done" : "Select"}
             </button>
           )}
-          <button onClick={onNew} className="rounded bg-sky-600 px-2 py-0.5 text-xs font-medium hover:bg-sky-500">
-            + New task
-          </button>
         </div>
       </div>
 
@@ -146,7 +142,7 @@ export function RunList({ selectedId, refreshKey, onSelect, onNew, onDeleted }: 
       )}
 
       {message && <p className="mb-2 rounded bg-red-500/10 px-2 py-1 text-xs text-red-300">{message}</p>}
-      {runs.length === 0 && <p className="text-xs text-zinc-500">No runs yet.</p>}
+      {runs.length === 0 && <p className="history-empty">No runs yet.</p>}
 
       <ul className="-mx-1 min-h-0 flex-1 space-y-1 overflow-y-auto">
         {runs.map((run) => (
@@ -163,6 +159,7 @@ export function RunList({ selectedId, refreshKey, onSelect, onNew, onDeleted }: 
               />
             )}
             <button
+              aria-current={run.id === selectedId ? "page" : undefined}
               onClick={() => (selecting && !isBusy(run) ? toggle(run.id) : onSelect(run.id))}
               className={`min-w-0 flex-1 rounded-md px-2 py-1.5 text-left hover:bg-zinc-800 ${
                 run.id === selectedId ? "bg-zinc-800" : ""

@@ -3,7 +3,8 @@
 // in dev, Vite's proxy forwards them; in production, the backend serves the UI.
 
 import type {
-  AgentStatus, ChangedFile, RunCreate, RunInfo, SettingsView, SummarySettings, SummaryTest,
+  AgentStatus, AppConnect, AppGuide, AppInfo, AppRunCreate, SetupView, AppRequirement, ChangedFile, InstallJob, RunCreate, RunInfo, SettingsView,
+  SummarySettings, SummaryTest,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -72,6 +73,56 @@ export const api = {
     request<SettingsView>(`/api/settings/keys/${provider}`, { method: "PUT", body: JSON.stringify({ key }) }),
   deleteKey: (provider: string) => request<SettingsView>(`/api/settings/keys/${provider}`, { method: "DELETE" }),
   providerModels: (provider: string) => request<{ models: string[] }>(`/api/settings/models/${provider}`),
+
+  // Apps tab
+  apps: () => request<AppInfo[]>("/api/apps"),
+  app: (id: string) => request<AppInfo>(`/api/apps/${id}`),
+  appsDefaultFolder: () => request<{ folder: string }>("/api/apps/default-folder"),
+  // Opens the computer's own "choose a folder" window (the backend runs on this
+  // computer); waits until the user picks one. path = null if they cancelled.
+  pickFolder: (start?: string, title?: string) =>
+    request<{ path: string | null }>("/api/pick-folder", {
+      method: "POST",
+      body: JSON.stringify({ start: start || null, title: title ?? null }),
+    }),
+  connectApp: (body: AppConnect) => request<AppInfo>("/api/apps", { method: "POST", body: JSON.stringify(body) }),
+  rescanApp: (id: string) => request<AppInfo>(`/api/apps/${id}/rescan`, { method: "POST" }),
+  forgetApp: (id: string) => request<{ deleted: boolean }>(`/api/apps/${id}`, { method: "DELETE" }),
+  guide: (id: string) => request<AppGuide>(`/api/apps/${id}/guide`),
+  // Slow (the cheapest model writes it); returns the saved guide at once if still current.
+  writeGuide: (id: string, force = false) =>
+    request<AppGuide>(`/api/apps/${id}/guide${force ? "?force=true" : ""}`, { method: "POST" }),
+  // The file goes as the raw body; the backend saves it inside the app's folder.
+  uploadFile: async (id: string, folder: string, file: File): Promise<{ path: string }> => {
+    const params = new URLSearchParams({ folder, name: file.name });
+    const res = await fetch(`/api/apps/${id}/upload?${params}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    });
+    if (!res.ok) throw new Error(await errorMessage(res));
+    return res.json();
+  },
+  appSetup: (id: string) => request<SetupView>(`/api/apps/${id}/setup`),
+  // values: field id -> answer ("" clears it). confirmUnsafe: the user agreed to turn a safe-mode switch off.
+  saveAppSetup: (id: string, values: Record<string, string>, confirmUnsafe = false) =>
+    request<SetupView>(`/api/apps/${id}/setup`, {
+      method: "PUT",
+      body: JSON.stringify({ values, confirm_unsafe: confirmUnsafe }),
+    }),
+  runApp: (id: string, body: AppRunCreate) =>
+    request<RunInfo>(`/api/apps/${id}/runs`, { method: "POST", body: JSON.stringify(body) }),
+  appRuns: (id: string) => request<RunInfo[]>(`/api/apps/${id}/runs`),
+  setAppTrust: (id: string, trusted: boolean) =>
+    request<{ trusted: boolean }>(`/api/apps/${id}/trust`, { method: "PUT", body: JSON.stringify({ trusted }) }),
+  // Opens the file with its usual program on this computer (reveal: show it in File Explorer).
+  openAppFile: (id: string, path: string, reveal = false) =>
+    request<{ ok: boolean }>(`/api/apps/${id}/open`, { method: "POST", body: JSON.stringify({ path, reveal }) }),
+  appTools: (id: string) => request<AppRequirement[]>(`/api/apps/${id}/tools`),
+  installTool: (toolId: string) => request<InstallJob>(`/api/tools/${toolId}/install`, { method: "POST" }),
+  // `after`: the last log line number we already have (-1 = none)
+  installProgress: (jobId: string, after: number) =>
+    request<InstallJob>(`/api/tools/installs/${jobId}?after=${after}`),
 };
 
 /** Builds a ws:// URL on the same host the page was loaded from. */

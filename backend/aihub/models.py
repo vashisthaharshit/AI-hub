@@ -88,6 +88,7 @@ EventKind = Literal[
     "result",             # end of a turn: cost, tokens, time
     "checks",             # AI-Hub's own measurements after a turn (files, tests)
     "usage",              # plan usage window reported by the agent (e.g. Claude's 5-hour limit)
+    "outputs",            # app runs: files the turn created or changed in the app's folder
     "error",              # something failed
     "raw",                # anything we don't understand yet (kept, never dropped)
 ]
@@ -232,6 +233,11 @@ class RunInfo(BaseModel):
     result: RunResult | None = None     # result of the latest turn
     metrics: RunMetrics | None = None   # measured after the latest turn
     outcome: RunOutcome | None = None   # set once the user keeps or discards the work
+    # "task" = Manual mode (own worktree). "app" = a connected app's command,
+    # run IN the app's folder (its data must stay in one place): no keep/discard.
+    kind: Literal["task", "app"] = "task"
+    app_id: str | None = None
+    label: str | None = None            # app runs: what the user clicked, e.g. "Check and apply to a job"
 
 
 # ---------- Apps (repos built on an agent, used through buttons) ----------
@@ -249,6 +255,9 @@ class AppCommand(BaseModel):
     agent: Literal["claude", "codex"] = "claude"           # whose format the command is in
     source: str                     # file it came from, relative to the repo
     from_skill: bool = False        # a skill the repo tells users to type (/scrape)
+    invoke: str = ""                # exactly what to type: "/apply" or "/day-trader-skill:trader-scanner"
+    plugin: str | None = None       # the plugin it comes from (loaded with --plugin-dir when run)
+    money: bool = False             # can move money (orders, payments): always asks first
 
 
 class AppSkill(BaseModel):
@@ -257,6 +266,7 @@ class AppSkill(BaseModel):
     agent: Literal["claude", "codex"]
     source: str
     user_invocable: bool = True
+    plugin: str | None = None
     # Only used while reading the repo (to decide which skills are buttons).
     raw_description: str = Field(default="", exclude=True)
     body: str = Field(default="", exclude=True)
@@ -271,6 +281,9 @@ class AppRequirement(BaseModel):
     installed: bool
     optional: bool = False
     auto: bool = False      # AI-Hub sets it up by itself (Python, via uv)
+    can_install: bool = False  # AI-Hub can install it (winget, on Windows)
+    website: str | None = None # where to get it by hand
+    note: str | None = None    # shown before installing, e.g. "Large download"
 
 
 class AppPermissions(BaseModel):
@@ -284,6 +297,65 @@ class AppPermissions(BaseModel):
     error: str | None = None
 
 
+class AppPlugin(BaseModel):
+    """A Claude Code plugin inside the repo; runs get `claude --plugin-dir <root>`."""
+
+    name: str
+    root: str   # relative to the repo ("." = the repo itself)
+    description: str | None = None
+
+
+SetupType = Literal["text", "secret", "number", "toggle", "email", "choice"]
+
+
+class SetupField(BaseModel):
+    """One question in an app's setup form (Setup & details tab)."""
+
+    id: str               # "env:ALPACA_API_KEY", "file:trader/config.json:sec_user_agent", "plugin:x:token"
+    kind: Literal["env", "file", "plugin"]
+    target: str           # env var name, config file path, or plugin name
+    key: str              # env var name, path inside the JSON ("risk.max_loss"), or userConfig key
+    label: str
+    type: SetupType = "text"
+    required: bool = False
+    advanced: bool = False          # hidden under "More settings"
+    default: str | None = None
+    help: str | None = None
+    choices: list[str] = Field(default_factory=list)
+    safety: bool = False            # a safe-mode switch (paper, sandbox, dry run...)
+    safe_value: str | None = None   # "true" or "false": the safe position
+
+
+class SetupFile(BaseModel):
+    source: str      # the example, e.g. trader-budget/config.example.json
+    target: str      # the real file AI-Hub creates, e.g. trader/config.json
+    editable: bool   # JSON: AI-Hub can fill in values. Other formats: copied as they are
+    exists: bool = False
+
+
+class McpServerInfo(BaseModel):
+    """A connection to an outside service (MCP server) the repo uses."""
+
+    name: str
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    url: str | None = None
+    env: list[str] = Field(default_factory=list)   # variables it needs (filled from the setup form)
+    source: str                       # where it's defined
+    plugin: str | None = None         # comes with this plugin (loaded with it)
+    money: bool = False               # a broker / payment service: every use asks first
+    spec: dict[str, Any] = Field(default_factory=dict)  # the original config (to write .mcp.json)
+
+
+class AppSetup(BaseModel):
+    fields: list[SetupField] = Field(default_factory=list)
+    files: list[SetupFile] = Field(default_factory=list)
+    servers: list[McpServerInfo] = Field(default_factory=list)
+    always_ask: list[str] = Field(default_factory=list)       # MCP servers whose tools always ask
+    money_commands: list[str] = Field(default_factory=list)   # commands that can move money
+    installed_skills: list[str] = Field(default_factory=list) # skills AI-Hub copied into .claude/skills
+
+
 class AppManifest(BaseModel):
     name: str
     summary: str | None = None      # first paragraph of the README
@@ -295,6 +367,130 @@ class AppManifest(BaseModel):
     requirements: list[AppRequirement] = Field(default_factory=list)
     permissions: AppPermissions = Field(default_factory=lambda: AppPermissions(found=False))
     context_files: list[str] = Field(default_factory=list)
+    plugins: list[AppPlugin] = Field(default_factory=list)
+    setup: AppSetup = Field(default_factory=AppSetup)
+
+
+class SetupView(BaseModel):
+    """The setup form with what the user has filled in so far."""
+
+    setup: AppSetup
+    values: dict[str, str] = Field(default_factory=dict)   # non-secret answers (saved, else the default)
+    secrets_set: list[str] = Field(default_factory=list)   # secret fields that have a saved value
+    missing: list[str] = Field(default_factory=list)       # required fields still empty
+    servers_ready: dict[str, bool] = Field(default_factory=dict)  # MCP server -> all its variables filled
+    unsafe: list[str] = Field(default_factory=list)        # safe-mode switches currently OFF
+    saved: bool = False                                    # has the user saved this form once
+    trusted: bool = False                                  # "Trust this repo" (money tools still ask)
+
+
+class SetupSave(BaseModel):
+    values: dict[str, str | None] = Field(default_factory=dict)  # field id -> answer ("" or null clears it)
+    confirm_unsafe: bool = False   # the user confirmed turning a safe-mode switch off
+
+
+InstallState = Literal[
+    "running",
+    "installed",       # the program can be found now
+    "restart_needed",  # installer finished fine, but Windows doesn't show the program yet
+    "failed",
+]
+
+
+class InstallJob(BaseModel):
+    """One install of a tool, polled by the UI while it runs."""
+
+    id: str
+    tool_id: str
+    label: str
+    state: InstallState
+    command: str                    # what runs, shown to the user
+    started_at: str
+    finished_at: str | None = None
+    message: str | None = None      # result, in plain words
+    lines: list[str] = Field(default_factory=list)  # log lines after the `after` the UI asked for
+    line_count: int = 0             # total lines so far; pass line_count - 1 as `after` next time
+
+
+class GuideExample(BaseModel):
+    request: str                 # what a user could type, e.g. "Apply to this job: <link>"
+    command: str | None = None   # the command it would use
+
+
+class GuideStep(BaseModel):
+    title: str
+    text: str | None = None
+    command: str | None = None
+
+
+FieldType = Literal["text", "long_text", "url", "url_or_text", "file", "choice", "toggle", "number", "date"]
+
+
+class FieldChoice(BaseModel):
+    value: str   # exactly what the command expects, e.g. "profile"
+    label: str   # what the user sees, e.g. "Only my profile"
+
+
+class FormField(BaseModel):
+    """One question on a command's card. Beginners answer questions; AI-Hub
+    turns the answers into the text after the command (see CommandForm.argument)."""
+
+    key: str
+    label: str                       # a plain question, e.g. "Which company is the interview with?"
+    type: FieldType = "text"
+    required: bool = False
+    advanced: bool = False           # hidden under "Add details (optional)"
+    placeholder: str | None = None
+    help: str | None = None
+    choices: list[FieldChoice] = Field(default_factory=list)  # for "choice"
+    value: str | None = None         # for "toggle": what is added when it's on, e.g. "--all"
+    file_types: list[str] = Field(default_factory=list)       # for "file", e.g. [".pdf", ".docx"]
+    save_to: str | None = None       # for "file": folder in the repo, e.g. "documents/cv"
+    multiple: bool = False           # for "file": several files at once
+
+
+class CommandForm(BaseModel):
+    title: str | None = None         # friendlier button name, e.g. "Find jobs"
+    description: str | None = None   # one plain sentence
+    fields: list[FormField] = Field(default_factory=list)
+    # How answers become the command's input: "{company} [--limit {limit}]".
+    # [ ] = optional part, dropped when a field inside it is empty.
+    argument: str = ""
+
+
+class AppGuide(BaseModel):
+    """The Guide tab of an app (see apps/guide.py)."""
+
+    what_it_does: str
+    examples: list[GuideExample] = Field(default_factory=list)
+    steps: list[GuideStep] = Field(default_factory=list)   # how to get started, in order
+    needs: list[str] = Field(default_factory=list)         # what the user must provide
+    commands: dict[str, CommandForm] = Field(default_factory=dict)  # command name -> its form
+    source: Literal["ai", "basic"]   # basic = built without AI from the commands
+    made_by: str | None = None       # e.g. "Claude Code · haiku"
+    fingerprint: str                 # of what the model saw; changes when the repo does
+    created_at: str
+
+
+class AppRunCreate(BaseModel):
+    """Run one of an app's commands (a card's Run button), or a request typed
+    in the Guide's box (`message`)."""
+
+    command: str | None = None                  # command name, e.g. "apply"
+    values: dict[str, str] = Field(default_factory=dict)  # the card's answers, by field key
+    message: str | None = None                  # free text instead of a command
+    agent_id: str | None = None                 # default: the agent the repo was made for
+    model: str | None = None
+    effort: str | None = None
+
+
+class AppTrust(BaseModel):
+    trusted: bool   # True: AI-Hub says yes to the agent's actions by itself, EXCEPT money tools
+
+
+class OpenPath(BaseModel):
+    path: str             # relative to the app's folder
+    reveal: bool = False  # True: show it in File Explorer instead of opening it
 
 
 class AppConnect(BaseModel):

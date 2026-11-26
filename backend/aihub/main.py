@@ -27,10 +27,23 @@ Endpoints
   GET  /api/settings/models/{p}        models your key can use
   GET  /api/apps                       connected apps (Apps tab)
   GET  /api/apps/default-folder        where links are cloned unless the user picks another folder
+  POST /api/pick-folder                open the computer's "choose a folder" window {start, title}
   POST /api/apps                       connect {url, folder} or {path}: clone + read the repo
   GET  /api/apps/{id}                  one app with its manifest (commands, tools it needs...)
   POST /api/apps/{id}/rescan           read the folder again
   DELETE /api/apps/{id}                remove from the Apps tab (the folder is NOT deleted)
+  GET  /api/apps/{id}/guide            the Guide tab: saved AI guide if still current, else the basic one
+  POST /api/apps/{id}/guide?force=false  write the guide with the cheapest model (slow) and save it
+  POST /api/apps/{id}/upload?folder=&name=   save a dropped file inside the app's folder (raw body)
+  POST /api/apps/{id}/runs             run a command {command, values} or a typed request {message}
+  GET  /api/apps/{id}/runs             this app's runs (newest first)
+  PUT  /api/apps/{id}/trust            {trusted}: auto-yes to the agent's actions, except money tools
+  POST /api/apps/{id}/open             open a file of the app {path, reveal}
+  GET  /api/apps/{id}/setup            the setup form (keys, config files, connections) + current answers
+  PUT  /api/apps/{id}/setup            save answers {values, confirm_unsafe}; writes config files / .mcp.json
+  GET  /api/apps/{id}/tools            look again for the tools the app needs (fresh, not cached)
+  POST /api/tools/{tool}/install       install a tool with winget (one at a time)
+  GET  /api/tools/installs/{job}?after=-1  install progress + new log lines (poll this)
   WS   /ws/runs/{id}?after=-1          past + live events of a run
   /                                    the React app (frontend/dist), if built
 """
@@ -41,16 +54,22 @@ import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from aihub import config, worktree
+from aihub import config, folder_picker, worktree
 from aihub.apps import connect as apps
+from aihub.apps import files as app_files
+from aihub.apps import running as app_running
+from aihub.apps import tools
+from aihub.apps.guide import GuideError, Guides
+from aihub.apps.setup_values import SetupError, SetupValues
 from aihub.agents.registry import default_registry
 from aihub.db import Database
 from aihub.models import (
-    AgentStatus, AppConnect, AppInfo, ApprovalDecision, ApprovalRequest, BulkDelete, ChangedFile, FollowUp, KeyUpdate, RunCreate,
+    AgentStatus, AppConnect, AppGuide, AppInfo, AppRequirement, AppRunCreate, AppTrust, OpenPath, SetupSave,
+    SetupView, ApprovalDecision, InstallJob, ApprovalRequest, BulkDelete, ChangedFile, FollowUp, KeyUpdate, RunCreate,
     RunInfo, SettingsView, SummarySettings, SummaryTest, UsageWindow,
 )
 from aihub.runner import RunError, RunManager
@@ -70,11 +89,26 @@ async def lifespan(app: FastAPI):
         app.state.registry.update_usage(agent_id, UsageWindow(**data))
     app.state.secrets = default_store()
     app.state.summarizer = Summarizer(db, app.state.registry, app.state.secrets)
-    app.state.runs = RunManager(db, app.state.registry, app.state.summarizer)
+    app.state.runs = RunManager(db, app.state.registry, app.state.summarizer, app_context=_app_context)
+    app.state.installer = tools.Installer()
+    app.state.guides = Guides(db, app.state.summarizer, app.state.registry)
+    app.state.setup_values = SetupValues(db, app.state.secrets)
     yield
     # ...and once at shutdown: stop running agents, close the database.
     await app.state.runs.shutdown()
     db.close()
+
+
+def _app_context(run: RunInfo) -> app_running.AppRunContext:
+    """Settings for one turn of an app run, read fresh (changed settings apply)."""
+    found = app.state.db.get_app(run.app_id or "")
+    if not found:
+        return app_running.AppRunContext()
+    # Which command started this run: a money command makes every action ask.
+    command = next((c.name for c in found.manifest.commands
+                    if c.invoke and (run.prompt == c.invoke or run.prompt.startswith(c.invoke + " "))), None)
+    values = app.state.setup_values
+    return app_running.build_context(found, values.run_env(found), values.trusted(found.id), command)
 
 
 app = FastAPI(title="AI-Hub", version="0.2.0", lifespan=lifespan)
@@ -96,7 +130,8 @@ async def _call(coro):
         return await coro
     except KeyError as exc:
         raise HTTPException(404, exc.args[0] if exc.args else "Not found") from None
-    except (RunError, worktree.GitError, apps.AppError) as exc:
+    except (RunError, worktree.GitError, apps.AppError, tools.InstallError, GuideError, app_files.UploadError, folder_picker.PickerError, SetupError,
+            app_running.AppRunError) as exc:
         raise HTTPException(400, str(exc)) from None
 
 
@@ -134,7 +169,7 @@ async def unhide_models(agent_id: str):
 
 @app.get("/api/runs", response_model=list[RunInfo])
 async def list_runs(limit: int = 50):
-    return app.state.db.list_runs(limit)
+    return app.state.db.list_runs(limit)  # Manual mode only; app runs are listed per app
 
 
 @app.post("/api/runs", response_model=RunInfo, status_code=201)
@@ -264,6 +299,16 @@ async def apps_default_folder():
     return {"folder": str(apps.default_folder())}
 
 
+@app.post("/api/pick-folder")
+async def pick_folder(body: dict | None = None):
+    """Opens a real folder dialog on this computer and waits for the user.
+    Returns {"path": "C:\\..."} or {"path": null} if they cancelled."""
+    body = body or {}
+    start = body.get("start") if isinstance(body.get("start"), str) else None
+    title = body.get("title") if isinstance(body.get("title"), str) else "Choose a folder"
+    return {"path": await _call(folder_picker.pick_folder(start, title[:100]))}
+
+
 @app.post("/api/apps", response_model=AppInfo, status_code=201)
 async def connect_app(req: AppConnect):
     """Can take a while: cloning downloads the whole repo."""
@@ -292,6 +337,126 @@ async def forget_app(app_id: str):
     await get_app(app_id)
     app.state.db.delete_app(app_id)
     return {"deleted": True}
+
+
+@app.get("/api/apps/{app_id}/guide", response_model=AppGuide)
+async def get_guide(app_id: str):
+    return app.state.guides.current(await get_app(app_id))
+
+
+@app.post("/api/apps/{app_id}/guide", response_model=AppGuide)
+async def write_guide(app_id: str, force: bool = False):
+    """Can take 10-30 seconds. Returns the saved guide at once if it's still current."""
+    return await _call(app.state.guides.write(await get_app(app_id), force))
+
+
+@app.get("/api/apps/{app_id}/setup", response_model=SetupView)
+async def get_setup(app_id: str):
+    return app.state.setup_values.view(await get_app(app_id))
+
+
+@app.put("/api/apps/{app_id}/setup", response_model=SetupView)
+async def save_setup(app_id: str, body: SetupSave):
+    """Secrets go to the OS keychain; config files and .mcp.json are written now."""
+    found = await get_app(app_id)
+
+    async def do():
+        return app.state.setup_values.save(found, body)
+    return await _call(do())
+
+
+@app.post("/api/apps/{app_id}/runs", response_model=RunInfo, status_code=201)
+async def run_app(app_id: str, body: AppRunCreate):
+    found = await get_app(app_id)
+    m = found.manifest
+    agent_id = body.agent_id or app_running.AGENT_IDS.get(m.primary_agent or "claude", "claude-code")
+    try:
+        adapter = app.state.registry.get(agent_id)
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from None
+
+    if body.command:
+        command = next((c for c in m.commands if c.name == body.command), None)
+        if not command:
+            raise HTTPException(404, f"This app has no command '{body.command}'")
+        if (command.money or m.setup.always_ask) and not adapter.supports_supervised:
+            raise HTTPException(400, f"{adapter.name} can't stop to ask you before orders or payments. "
+                                     "Use Claude Code for this app.")
+        form = app.state.guides.current(found).commands.get(command.name)
+        label = (form.title if form and form.title else None) or command.title
+        try:
+            prompt = app_running.build_prompt(found, command, form, body.values, adapter.id)
+        except app_running.AppRunError as exc:
+            raise HTTPException(400, str(exc)) from None
+    elif body.message and body.message.strip():
+        if m.setup.always_ask and not adapter.supports_supervised:
+            raise HTTPException(400, f"{adapter.name} can't stop to ask you before orders. Use Claude Code.")
+        prompt, label = body.message.strip(), "Your request"
+    else:
+        raise HTTPException(400, "Pick a command or type what you want to do.")
+    return await _call(runs().start_app(found.id, found.path, adapter, prompt, label, body.model, body.effort))
+
+
+@app.get("/api/apps/{app_id}/runs", response_model=list[RunInfo])
+async def list_app_runs(app_id: str, limit: int = 30):
+    await get_app(app_id)
+    return app.state.db.list_runs(limit, kind="app", app_id=app_id)
+
+
+@app.put("/api/apps/{app_id}/trust")
+async def set_app_trust(app_id: str, body: AppTrust):
+    await get_app(app_id)
+    app.state.setup_values.set_trusted(app_id, body.trusted)
+    return {"trusted": body.trusted}
+
+
+@app.post("/api/apps/{app_id}/open")
+async def open_app_file(app_id: str, body: OpenPath):
+    found = await get_app(app_id)
+
+    async def do():
+        app_running.open_path(found, body.path, body.reveal)
+        return {"ok": True}
+    return await _call(do())
+
+
+@app.post("/api/apps/{app_id}/upload")
+async def upload_file(app_id: str, request: Request, name: str, folder: str = "uploads"):
+    """The file is the raw request body (no multipart, so no extra dependency).
+    Returns {"path": "documents/cv/CV.pdf"}, relative to the app's folder."""
+    found = await get_app(app_id)
+    if int(request.headers.get("content-length") or 0) > app_files.MAX_BYTES:
+        raise HTTPException(400, f"The file is too big (over {app_files.MAX_BYTES // (1024 * 1024)} MB).")
+    data = await request.body()
+
+    async def do():
+        return {"path": app_files.save_upload(Path(found.path), folder, name, data)}
+    return await _call(do())
+
+
+@app.get("/api/apps/{app_id}/tools", response_model=list[AppRequirement])
+async def check_app_tools(app_id: str):
+    """Look for every tool again, e.g. after the user installed one by hand,
+    and save the result so the app list shows it too."""
+    found = await get_app(app_id)
+    found.manifest.requirements = tools.recheck(found.manifest.requirements)
+    app.state.db.update_app_manifest(app_id, found.manifest)
+    return found.manifest.requirements
+
+
+@app.post("/api/tools/{tool_id}/install", response_model=InstallJob, status_code=201)
+async def install_tool(tool_id: str):
+    """Only called when the user clicks Install. Returns right away; poll the job."""
+    async def do():
+        return app.state.installer.start(tool_id)
+    return await _call(do())
+
+
+@app.get("/api/tools/installs/{job_id}", response_model=InstallJob)
+async def install_progress(job_id: str, after: int = -1):
+    async def do():
+        return app.state.installer.get(job_id, after)
+    return await _call(do())
 
 
 # ---------- supervised mode ----------

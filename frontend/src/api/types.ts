@@ -57,6 +57,7 @@ export type EventKind =
   | "result"
   | "checks"
   | "usage"
+  | "outputs" // app runs: files a turn created or changed
   | "error"
   | "raw";
 
@@ -103,6 +104,22 @@ export interface RunInfo {
   result: RunResult | null;
   metrics: RunMetrics | null;
   outcome: RunOutcome | null;
+  kind: "task" | "app"; // app = an app's command, run in the app's own folder
+  app_id: string | null;
+  label: string | null; // what the user clicked, e.g. "Check and apply to a job"
+}
+
+export interface AppRunCreate {
+  command?: string | null; // a card's command name
+  values?: Record<string, string>; // the card's answers, by field key
+  message?: string | null; // or a request typed in the Guide
+  agent_id?: string | null;
+}
+
+export interface OutputFile {
+  path: string;
+  status: "new" | "changed";
+  size: number;
 }
 
 export interface RunCreate {
@@ -163,3 +180,214 @@ export interface EndMessage {
 }
 
 export type SocketMessage = EventMessage | EndMessage;
+
+// ---------- Apps (repos built on an agent, used through buttons) ----------
+
+export type InputMode = "none" | "optional" | "required";
+
+export interface AppCommand {
+  name: string; // what follows the slash: "apply" -> /apply
+  namespace: string | null;
+  title: string; // button text
+  description: string | null;
+  argument_hint: string | null; // e.g. "either a URL or pasted text"
+  input: InputMode; // show a text field?
+  kind: "start" | "normal" | "danger"; // start = "Start here", danger = ask first
+  agent: "claude" | "codex";
+  source: string; // file it came from
+  from_skill: boolean; // a skill the repo tells users to type (/scrape)
+  invoke: string; // exactly what is typed: "/apply" or "/day-trader-skill:trader-scanner"
+  plugin: string | null;
+  money: boolean; // can move money: always asks first
+}
+
+export interface AppSkill {
+  name: string;
+  description: string | null;
+  agent: "claude" | "codex";
+  source: string;
+  user_invocable: boolean;
+  plugin: string | null;
+}
+
+export interface AppRequirement {
+  id: string; // "git", "python", "bun", "latex", "docker"...
+  label: string;
+  why: string;
+  installed: boolean;
+  optional: boolean;
+  auto: boolean; // AI-Hub sets it up by itself (Python, via uv)
+  can_install: boolean; // AI-Hub can install it (winget, Windows)
+  website: string | null;
+  note: string | null; // e.g. "Large download"
+}
+
+export interface AppPermissions {
+  found: boolean;
+  allow: string[];
+  ask: string[];
+  deny: string[];
+  raw: string[];
+  error: string | null;
+}
+
+export interface AppPlugin {
+  name: string;
+  root: string;
+  description: string | null;
+}
+
+export type SetupType = "text" | "secret" | "number" | "toggle" | "email" | "choice";
+
+export interface SetupField {
+  id: string;
+  kind: "env" | "file" | "plugin";
+  target: string; // env var, config file path, or plugin name
+  key: string;
+  label: string;
+  type: SetupType;
+  required: boolean;
+  advanced: boolean;
+  default: string | null;
+  help: string | null;
+  choices: string[];
+  safety: boolean; // safe-mode switch (paper, sandbox, dry run)
+  safe_value: string | null;
+}
+
+export interface SetupFile {
+  source: string;
+  target: string;
+  editable: boolean;
+  exists: boolean;
+}
+
+export interface McpServerInfo {
+  name: string;
+  command: string | null;
+  args: string[];
+  url: string | null;
+  env: string[];
+  source: string;
+  plugin: string | null;
+  money: boolean;
+}
+
+export interface AppSetup {
+  fields: SetupField[];
+  files: SetupFile[];
+  servers: McpServerInfo[];
+  always_ask: string[];
+  money_commands: string[];
+  installed_skills: string[];
+}
+
+export interface SetupView {
+  setup: AppSetup;
+  values: Record<string, string>; // non-secret answers
+  secrets_set: string[];
+  missing: string[];
+  servers_ready: Record<string, boolean>;
+  unsafe: string[];
+  saved: boolean;
+  trusted: boolean; // "Trust this repo": auto-yes, except money tools
+}
+
+export interface AppManifest {
+  name: string;
+  summary: string | null;
+  tier: 1 | 2 | 3; // 1 commands, 2 only instructions, 3 not an app
+  agents: string[];
+  primary_agent: string | null;
+  commands: AppCommand[];
+  skills: AppSkill[];
+  requirements: AppRequirement[];
+  permissions: AppPermissions;
+  context_files: string[];
+  plugins: AppPlugin[];
+  setup: AppSetup;
+}
+
+export interface AppInfo {
+  id: string;
+  name: string;
+  url: string | null;
+  path: string;
+  created_at: string;
+  updated_at: string;
+  manifest: AppManifest;
+}
+
+export interface AppConnect {
+  url?: string | null;
+  folder?: string | null; // where to clone into; default ~/aihub/repos
+  path?: string | null; // an existing local folder instead of a link
+}
+
+export type InstallState = "running" | "installed" | "restart_needed" | "failed";
+
+export interface InstallJob {
+  id: string;
+  tool_id: string;
+  label: string;
+  state: InstallState;
+  command: string;
+  started_at: string;
+  finished_at: string | null;
+  message: string | null;
+  lines: string[]; // only the lines after the `after` we asked for
+  line_count: number;
+}
+
+export interface GuideExample {
+  request: string; // what a user could type
+  command: string | null; // the command it would use
+}
+
+export interface GuideStep {
+  title: string;
+  text: string | null;
+  command: string | null;
+}
+
+export type FieldType =
+  | "text" | "long_text" | "url" | "url_or_text" | "file" | "choice" | "toggle" | "number" | "date";
+
+export interface FieldChoice {
+  value: string; // exactly what the command expects
+  label: string; // what the user sees
+}
+
+export interface FormField {
+  key: string;
+  label: string; // a plain question
+  type: FieldType;
+  required: boolean;
+  advanced: boolean; // hidden under "Add details (optional)"
+  placeholder: string | null;
+  help: string | null;
+  choices: FieldChoice[];
+  value: string | null; // toggle: what is added when on, e.g. "--all"
+  file_types: string[]; // file: e.g. [".pdf", ".docx"]
+  save_to: string | null; // file: folder in the repo
+  multiple: boolean;
+}
+
+export interface CommandForm {
+  title: string | null; // friendlier button name
+  description: string | null;
+  fields: FormField[];
+  argument: string; // "{company} [--limit {limit}]"; filled in by the backend when running
+}
+
+export interface AppGuide {
+  what_it_does: string;
+  examples: GuideExample[];
+  steps: GuideStep[];
+  needs: string[];
+  commands: Record<string, CommandForm>; // command name -> its form
+  source: "ai" | "basic"; // basic = built without AI from the commands
+  made_by: string | null; // e.g. "Claude Code · haiku"
+  fingerprint: string;
+  created_at: string;
+}

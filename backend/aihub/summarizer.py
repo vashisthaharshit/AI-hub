@@ -1,7 +1,8 @@
 """The summary model: an LLM that writes short summaries for AI-Hub.
 
-First use: the handoff when switching agents mid-run (see runner.py).
-Later: run titles, notes for the orchestrator, etc.
+Uses: the handoff when switching agents mid-run (see runner.py), and the
+beginner guide of a connected app (apps/guide.py). complete() is the
+general call; summarize() is complete() with the handoff instructions.
 
 Where the LLM comes from (the user picks in Settings):
 - "agent": one of the user's own agents (e.g. Claude Code with Haiku, or
@@ -79,12 +80,17 @@ class Summarizer:
     # ---------- summarizing ----------
 
     async def summarize(self, text: str, settings: SummarySettings | None = None) -> str:
+        return await self.complete(INSTRUCTIONS, text, settings)
+
+    async def complete(self, instructions: str, text: str, settings: SummarySettings | None = None,
+                       max_tokens: int = 800) -> str:
+        """Ask the chosen LLM once: instructions + text in, answer text out."""
         s = settings or self.settings()
         if s.provider == "off":
             raise SummaryError("No summary model is set.")
         if s.provider == "agent":
-            return await self._via_agent(s, text)
-        return await self._via_http(s, text)
+            return await self._via_agent(s, instructions, text)
+        return await self._via_http(s, instructions, text, max_tokens)
 
     async def test(self, settings: SummarySettings) -> SummaryTest:
         """Summarize a tiny example, to check the settings work before saving them."""
@@ -101,7 +107,7 @@ class Summarizer:
         return SummaryTest(ok=True, summary=summary, used=self.describe(settings),
                            duration_ms=int((time.monotonic() - start) * 1000))
 
-    async def _via_agent(self, s: SummarySettings, text: str) -> str:
+    async def _via_agent(self, s: SummarySettings, instructions: str, text: str) -> str:
         try:
             adapter = self.registry.get(s.agent_id or "")
         except KeyError:
@@ -109,7 +115,7 @@ class Summarizer:
         # An empty temp folder: the agent can't touch any real files.
         with tempfile.TemporaryDirectory() as tmp:
             options = RunOptions(model=s.model, effort=s.effort, max_turns=1)
-            events = [e async for e in adapter.run(f"{INSTRUCTIONS}\n\n---\n\n{text}", Path(tmp), options)]
+            events = [e async for e in adapter.run(f"{instructions}\n\n---\n\n{text}", Path(tmp), options)]
         result = next((e for e in events if e.kind == "result"), None)
         if result and result.data.get("success") and result.data.get("summary"):
             return str(result.data["summary"]).strip()
@@ -119,7 +125,7 @@ class Summarizer:
         errors = [str(e.data.get("message", "")) for e in events if e.kind == "error"]
         raise SummaryError(errors[0] if errors else f"{adapter.name} didn't return a summary.")
 
-    async def _via_http(self, s: SummarySettings, text: str) -> str:
+    async def _via_http(self, s: SummarySettings, instructions: str, text: str, max_tokens: int = 800) -> str:
         label = HTTP_PROVIDERS[s.provider][0]
         key = self.secrets.get(s.provider)
         if not key:
@@ -128,9 +134,9 @@ class Summarizer:
             raise SummaryError(f"Pick a {label} model.")
         body = {
             "model": s.model,
-            "messages": [{"role": "system", "content": INSTRUCTIONS}, {"role": "user", "content": text}],
+            "messages": [{"role": "system", "content": instructions}, {"role": "user", "content": text}],
             "temperature": 0.2,
-            "max_tokens": 800,
+            "max_tokens": max_tokens,
         }
         data = await asyncio.to_thread(_request, "POST", f"{base_url(s.provider)}/chat/completions", key, body)
         try:

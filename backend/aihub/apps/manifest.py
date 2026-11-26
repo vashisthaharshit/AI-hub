@@ -9,6 +9,8 @@ What we look for
   .claude/skills/*/SKILL.md    Claude Code skills; also buttons when the repo tells
                                users to type them (`/scrape` in ai-job-search)
   .agents/skills/*/SKILL.md    Codex skills
+  .claude-plugin/*.json        a Claude Code plugin: its skills/, commands/, .mcp.json
+                               (buttons become /<plugin>:<name>; see plugins.py)
   CLAUDE.md / AGENTS.md        instructions each agent reads at start
   .claude/settings.json        what the repo allows the agent to do
   README / SETUP / tools/      hints about the programs it needs (Bun, LaTeX...)
@@ -22,11 +24,14 @@ Tiers
 import html
 import json
 import re
-import shutil
 from collections.abc import Callable
 from pathlib import Path
 
-from aihub.models import AppCommand, AppManifest, AppPermissions, AppRequirement, AppSkill
+from aihub.apps import tools
+from aihub.apps.install import MARKER
+from aihub.apps.plugins import PluginInfo, find_plugins
+from aihub.apps.setup import read_setup
+from aihub.models import AppCommand, AppManifest, AppPermissions, AppPlugin, AppRequirement, AppSkill
 
 # Folders never worth walking into.
 _SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", ".cache"}
@@ -190,6 +195,24 @@ def _command_kind(name: str) -> str:
     return "normal"
 
 
+def _command(repo: Path, path: Path, name: str, namespace: str | None, plugin: str | None,
+             extra: dict | None = None) -> AppCommand:
+    fields, body = parse_frontmatter(_read(path))
+    extra = extra or {}
+    mode, hint = input_mode(fields.get("argument-hint") or extra.get("argumentHint") or None, body)
+    return AppCommand(
+        name=name, namespace=namespace, title=_title(name),
+        description=_clean_description(fields.get("description") or extra.get("description") or _first_line(body), name),
+        argument_hint=hint, input=mode, kind=_command_kind(name), agent="claude",
+        source=path.relative_to(repo).as_posix(), plugin=plugin,
+        invoke=f"/{plugin}:{name}" if plugin else f"/{name}",
+    )
+
+
+def read_plugin_commands(repo: Path, plugins: list[PluginInfo]) -> list[AppCommand]:
+    return [_command(repo, path, name, None, p.name, extra) for p in plugins for name, path, extra in p.command_files]
+
+
 def read_commands(repo: Path) -> list[AppCommand]:
     """Claude Code slash commands: one Markdown file per command.
 
@@ -201,34 +224,22 @@ def read_commands(repo: Path) -> list[AppCommand]:
         return []
     commands = []
     for path in sorted(folder.rglob("*.md")):
-        fields, body = parse_frontmatter(_read(path))
         rel = path.relative_to(folder)
-        namespace = "/".join(rel.parts[:-1]) or None
-        name = path.stem
-        # $ARGUMENTS = everything typed after the command; $1, $2 = single words.
-        mode, hint = input_mode(fields.get("argument-hint") or None, body)
-        commands.append(AppCommand(
-            name=name,
-            namespace=namespace,
-            title=_title(name),
-            description=_clean_description(fields.get("description") or _first_line(body), name),
-            argument_hint=hint,
-            input=mode,
-            kind=_command_kind(name),
-            agent="claude",
-            source=path.relative_to(repo).as_posix(),
-        ))
+        commands.append(_command(repo, path, path.stem, "/".join(rel.parts[:-1]) or None, None))
     return commands
 
 
-def read_skills(repo: Path) -> list[AppSkill]:
+def read_skills(repo: Path, plugins: list[PluginInfo] | None = None) -> list[AppSkill]:
     """Skills: folders with a SKILL.md. The agent picks them up by itself;
     we list them so the user knows what the app can do."""
+    places: list[tuple[str, str | None, list[Path]]] = [
+        ("claude", None, sorted((repo / ".claude" / "skills").glob("*/SKILL.md"))),
+        ("codex", None, sorted((repo / ".agents" / "skills").glob("*/SKILL.md"))),
+    ]
+    places += [("claude", p.name, p.skill_files) for p in plugins or []]
     skills = []
-    for agent, folder in (("claude", repo / ".claude" / "skills"), ("codex", repo / ".agents" / "skills")):
-        if not folder.is_dir():
-            continue
-        for skill_md in sorted(folder.glob("*/SKILL.md")):
+    for agent, plugin, skill_files in places:
+        for skill_md in skill_files:
             fields, body = parse_frontmatter(_read(skill_md))
             name = fields.get("name") or skill_md.parent.name
             skills.append(AppSkill(
@@ -237,6 +248,7 @@ def read_skills(repo: Path) -> list[AppSkill]:
                 agent=agent,
                 source=skill_md.relative_to(repo).as_posix(),
                 user_invocable=fields.get("user-invocable", "").lower() != "false",
+                plugin=plugin,
                 raw_description=fields.get("description") or "",
                 body=body,
             ))
@@ -247,25 +259,29 @@ def _mentions_slash(text: str, name: str) -> bool:
     return re.search(rf"(?<![\w/]){re.escape('/' + name)}(?![\w-])", text) is not None
 
 
-def skills_as_commands(skills: list[AppSkill], readme: str, taken: set[str]) -> list[AppCommand]:
+def skills_as_commands(skills: list[AppSkill], readme: str, taken: set[str], all_skills: bool = False) -> list[AppCommand]:
     """Claude Code skills can be started like commands (`/scrape`).
 
-    A skill becomes a button only if the repo itself tells people to type it:
-    its description or the README mentions `/<name>`. Skills that are only
-    helpers for other commands (e.g. job-application-assistant, used by
-    /apply) stay off the button list.
+    A skill becomes a button when the repo tells people to type it (its
+    description or the README mentions `/<name>`), or when the repo has no
+    commands at all (`all_skills`): then the skills ARE the app, e.g. a
+    plugin made of skills. In a repo that has commands, skills nobody is
+    told to type are helpers (job-application-assistant, used by /apply)
+    and stay off the button list.
     """
     commands = []
     for skill in skills:
         if skill.agent != "claude" or not skill.user_invocable or skill.name in taken:
             continue
-        if not (_mentions_slash(skill.raw_description, skill.name) or _mentions_slash(readme, skill.name)):
+        told = _mentions_slash(skill.raw_description, skill.name) or _mentions_slash(readme, skill.name)
+        if not (told or all_skills):
             continue
         mode, hint = input_mode(None, skill.body)
         commands.append(AppCommand(
             name=skill.name, title=_title(skill.name), description=skill.description,
             argument_hint=hint, input=mode, kind=_command_kind(skill.name),
-            agent="claude", source=skill.source, from_skill=True,
+            agent="claude", source=skill.source, from_skill=True, plugin=skill.plugin,
+            invoke=f"/{skill.plugin}:{skill.name}" if skill.plugin else f"/{skill.name}",
         ))
     return commands
 
@@ -357,40 +373,37 @@ def _plain(rules: list[str]) -> list[str]:
 # ---------- programs it needs ----------
 
 def read_requirements(repo: Path, files: list[Path], hint_text: str,
-                      which: Callable[[str], str | None] = shutil.which) -> list[AppRequirement]:
+                      which: Callable[[str], str | None] | None = None) -> list[AppRequirement]:
     """Programs the repo needs on the machine, with the reason we think so.
 
-    `which` finds a program on PATH; tests pass a fake one.
+    This decides WHICH tools are needed; tools.py knows how to find and
+    install each one. `which` replaces the search; tests pass a fake one.
     """
     names = {f.name.lower() for f in files}
     suffixes = {f.suffix.lower() for f in files}
     text = hint_text.lower()
     found: list[AppRequirement] = []
 
-    def add(id_, label, why, programs, optional=False, auto=False):
-        installed = any(which(p) for p in programs)
-        found.append(AppRequirement(id=id_, label=label, why=why, installed=installed,
-                                    optional=optional, auto=auto))
+    def add(tool_id, why, optional=False, auto=False):
+        found.append(tools.status(tool_id, why, optional=optional, auto=auto, which=which))
 
-    add("git", "Git", "Needed to download and update the repo", ["git"])
+    add("git", "Needed to download and update the repo")
 
     has_python = ".py" in suffixes or names & {"pyproject.toml", "requirements.txt", "setup.py", "pipfile"}
     if has_python:
         # uv downloads the right Python version itself, so this one is automatic.
-        add("python", "Python", "The repo has Python files (AI-Hub sets this up with uv)",
-            ["uv"], auto=True)
+        add("python", "The repo has Python files (AI-Hub sets this up with uv)", auto=True)
 
     if names & {"bun.lock", "bun.lockb", "bunfig.toml"} or re.search(r"\bbunx?\b", text):
-        add("bun", "Bun", "The repo uses Bun (a JavaScript runtime) for some of its tools", ["bun"])
+        add("bun", "The repo uses Bun (a JavaScript runtime) for some of its tools")
     elif "package.json" in names:
-        add("node", "Node.js", "The repo has a package.json", ["node"])
+        add("node", "The repo has a package.json")
 
     if suffixes & {".tex", ".cls"} or re.search(r"\b(lua|xe|pdf)latex\b", text):
-        add("latex", "LaTeX", "Used to make PDF documents (e.g. CVs and letters)",
-            ["lualatex", "xelatex", "pdflatex"])
+        add("latex", "Used to make PDF documents")
 
     if names & {"dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}:
-        add("docker", "Docker", "The repo can also run in Docker (optional)", ["docker"], optional=True)
+        add("docker", "The repo can also run in Docker (optional)", optional=True)
 
     return found
 
@@ -433,7 +446,7 @@ def _summary(readme: str) -> str | None:
     return None
 
 
-def build_manifest(repo: Path, which: Callable[[str], str | None] = shutil.which) -> AppManifest:
+def build_manifest(repo: Path, which: Callable[[str], str | None] | None = None) -> AppManifest:
     repo = Path(repo)
     readme = _readme(repo)
     files = list(_walk(repo))
@@ -443,14 +456,22 @@ def build_manifest(repo: Path, which: Callable[[str], str | None] = shutil.which
     hint_files += [f for f in files if f.parent.name in ("tools", "scripts") and f.suffix in (".py", ".sh", ".ps1")]
     hint_text = "\n".join(_read(f) for f in hint_files if f.is_file())
 
-    skills = read_skills(repo)
-    commands = read_commands(repo)
-    commands += skills_as_commands(skills, readme, taken={c.name for c in commands})
+    plugins = find_plugins(repo)
+    skills = read_skills(repo, plugins)
+    commands = read_commands(repo) + read_plugin_commands(repo, plugins)
+    commands += skills_as_commands(skills, readme, taken={c.name for c in commands}, all_skills=not commands)
     commands = order_commands(commands, readme)
     context_files = [n for n in ("CLAUDE.md", "AGENTS.md", "SETUP.md", "README.md") if (repo / n).is_file()]
 
+    # Setup form + which commands can move money (fix 5)
+    texts = [(c.name, c.description or "") for c in commands]   # name + description only (see setup.py)
+    setup = read_setup(repo, plugins, texts)
+    setup.installed_skills = sorted(m.parent.name for m in (repo / ".claude" / "skills").glob(f"*/{MARKER}"))
+    for c in commands:
+        c.money = c.name in setup.money_commands
+
     agents = []
-    if (repo / ".claude").is_dir() or (repo / "CLAUDE.md").is_file():
+    if (repo / ".claude").is_dir() or (repo / "CLAUDE.md").is_file() or plugins:
         agents.append("claude")
     if (repo / "AGENTS.md").is_file() or (repo / ".agents" / "skills").is_dir():
         agents.append("codex")
@@ -473,4 +494,7 @@ def build_manifest(repo: Path, which: Callable[[str], str | None] = shutil.which
         requirements=read_requirements(repo, files, hint_text, which),
         permissions=read_permissions(repo),
         context_files=context_files,
+        plugins=[AppPlugin(name=p.name, root=p.root.relative_to(repo.resolve()).as_posix() or ".",
+                           description=p.description) for p in plugins],
+        setup=setup,
     )

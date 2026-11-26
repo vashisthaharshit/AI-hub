@@ -114,8 +114,10 @@ class ClaudeCodeAdapter(AgentAdapter):
         if mcp_config:
             # Supervised: normal permission rules; anything that needs a
             # permission prompt is sent to our approval tool instead.
+            # App runs use acceptEdits: editing files in the app's folder is
+            # its normal work; commands, web access and MCP tools still ask.
             cmd += [
-                "--permission-mode", "default",
+                "--permission-mode", "acceptEdits" if options.accept_edits else "default",
                 "--mcp-config", str(mcp_config),
                 "--permission-prompt-tool", APPROVAL_TOOL,
             ]
@@ -131,6 +133,10 @@ class ClaudeCodeAdapter(AgentAdapter):
             cmd += ["--effort", options.effort]
         if options.max_turns:
             cmd += ["--max-turns", str(options.max_turns)]
+        for folder in options.plugin_dirs or []:
+            # Load a plugin for this run only (nothing installed). Its skills
+            # become /<plugin>:<skill>, its .mcp.json servers start with it.
+            cmd += ["--plugin-dir", folder]
         return cmd
 
     async def run(
@@ -143,7 +149,7 @@ class ClaudeCodeAdapter(AgentAdapter):
             return
 
         mcp_config = _write_mcp_config(options.approval_env) if options.approval_env else None
-        extra_env = {"MCP_TOOL_TIMEOUT": APPROVAL_TIMEOUT_MS} if mcp_config else None
+        extra_env = {**(options.extra_env or {}), **({"MCP_TOOL_TIMEOUT": APPROVAL_TIMEOUT_MS} if mcp_config else {})}
         try:
             async for line in stream_lines(self.build_command(path, options, mcp_config), workdir, prompt, extra_env):
                 for event in parse_line(line):

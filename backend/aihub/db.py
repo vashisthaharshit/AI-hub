@@ -19,7 +19,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from aihub.models import AgentEvent, AppInfo, AppManifest, RunInfo, RunMetrics, RunResult
+from aihub.models import AgentEvent, AppGuide, AppInfo, AppManifest, RunInfo, RunMetrics, RunResult
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -85,6 +85,14 @@ ADDED_COLUMNS = {
     "outcome": "TEXT",
     "model": "TEXT",
     "effort": "TEXT",
+    "kind": "TEXT NOT NULL DEFAULT 'task'",
+    "app_id": "TEXT",
+    "label": "TEXT",
+}
+
+# Same idea for the apps table.
+ADDED_APP_COLUMNS = {
+    "guide_json": "TEXT",   # the AI-written guide (apps/guide.py)
 }
 
 # Only these fields may be changed by update_run (protects against SQL injection).
@@ -113,6 +121,10 @@ class Database:
             for column, sql_type in ADDED_COLUMNS.items():
                 if column not in existing:
                     self.conn.execute(f"ALTER TABLE runs ADD COLUMN {column} {sql_type}")
+            app_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(apps)")}
+            for column, sql_type in ADDED_APP_COLUMNS.items():
+                if column not in app_columns:
+                    self.conn.execute(f"ALTER TABLE apps ADD COLUMN {column} {sql_type}")
 
     def close(self) -> None:
         self.conn.close()
@@ -123,11 +135,11 @@ class Database:
         with self.conn:
             self.conn.execute(
                 "INSERT INTO runs (id, agent_id, repo_path, prompt, state, branch, worktree_path,"
-                " created_at, base_commit, supervised, test_command, model, effort)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " created_at, base_commit, supervised, test_command, model, effort, kind, app_id, label)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (run.id, run.agent_id, run.repo_path, run.prompt, run.state, run.branch,
                  run.worktree_path, run.created_at, run.base_commit, int(run.supervised),
-                 run.test_command, run.model, run.effort),
+                 run.test_command, run.model, run.effort, run.kind, run.app_id, run.label),
             )
 
     def update_run(self, run_id: str, **fields) -> None:
@@ -147,10 +159,17 @@ class Database:
         row = self.conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         return _row_to_run(row) if row else None
 
-    def list_runs(self, limit: int = 50) -> list[RunInfo]:
-        rows = self.conn.execute(
-            "SELECT * FROM runs ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)
-        ).fetchall()
+    def list_runs(self, limit: int = 50, kind: str | None = "task", app_id: str | None = None) -> list[RunInfo]:
+        """Newest first. Manual mode lists kind="task"; an app lists its own runs."""
+        where, args = [], []
+        if kind:
+            where.append("kind = ?")
+            args.append(kind)
+        if app_id:
+            where.append("app_id = ?")
+            args.append(app_id)
+        sql = "SELECT * FROM runs" + (f" WHERE {' AND '.join(where)}" if where else "")
+        rows = self.conn.execute(sql + " ORDER BY created_at DESC, rowid DESC LIMIT ?", (*args, limit)).fetchall()
         return [_row_to_run(r) for r in rows]
 
     def mark_interrupted_runs(self) -> None:
@@ -251,6 +270,14 @@ class Database:
         rows = self.conn.execute("SELECT * FROM apps ORDER BY created_at DESC, rowid DESC").fetchall()
         return [_row_to_app(r) for r in rows]
 
+    def get_app_guide(self, app_id: str) -> AppGuide | None:
+        row = self.conn.execute("SELECT guide_json FROM apps WHERE id = ?", (app_id,)).fetchone()
+        return AppGuide.model_validate_json(row["guide_json"]) if row and row["guide_json"] else None
+
+    def set_app_guide(self, app_id: str, guide: AppGuide) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE apps SET guide_json = ? WHERE id = ?", (guide.model_dump_json(), app_id))
+
     def delete_app(self, app_id: str) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM apps WHERE id = ?", (app_id,))
@@ -270,6 +297,7 @@ def _row_to_run(row: sqlite3.Row) -> RunInfo:
         result=RunResult.model_validate_json(row["result_json"]) if row["result_json"] else None,
         metrics=RunMetrics.model_validate_json(row["metrics_json"]) if row["metrics_json"] else None,
         outcome=row["outcome"], model=row["model"], effort=row["effort"],
+        kind=row["kind"] or "task", app_id=row["app_id"], label=row["label"],
     )
 
 

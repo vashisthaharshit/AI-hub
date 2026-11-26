@@ -4,7 +4,7 @@
 // For the UI it's nicer to show each tool call as ONE card with its result
 // inside, so we pair them up by id here. Pure functions: easy to test.
 
-import type { EventMessage, RunMetrics, RunResult } from "../api/types";
+import type { EventMessage, OutputFile, RunMetrics, RunResult } from "../api/types";
 
 export interface ToolItem {
   type: "tool";
@@ -21,6 +21,7 @@ export interface ApprovalItem {
   id: string;
   toolName: string;
   input: Record<string, unknown>;
+  money: boolean; // a tool that can move money: always asks
   decision?: { behavior: "allow" | "deny"; message: string | null };
 }
 
@@ -48,6 +49,8 @@ export type Item =
   | ToolItem
   | { type: "result"; seq: number; result: RunResult }
   | { type: "error"; seq: number; message: string }
+  | { type: "outputs"; seq: number; files: OutputFile[]; total: number }
+  | { type: "auto_allowed"; seq: number; toolName: string }
   | { type: "raw"; seq: number; data: Record<string, unknown> };
 
 export function groupEvents(events: EventMessage[]): Item[] {
@@ -80,12 +83,18 @@ export function groupEvents(events: EventMessage[]): Item[] {
           id: String(d.id),
           toolName: String(d.tool_name ?? "tool"),
           input: (d.input as Record<string, unknown>) ?? {},
+          money: Boolean(d.money),
         };
         approvalsById.set(approval.id, approval);
         items.push(approval);
         break;
       }
       case "approval_resolved": {
+        if (d.auto) {
+          // A trusted app: AI-Hub said yes by itself (never for money tools).
+          items.push({ type: "auto_allowed", seq: e.seq, toolName: String(d.tool_name ?? "tool") });
+          break;
+        }
         const approval = approvalsById.get(String(d.id));
         if (approval) {
           approval.decision = {
@@ -133,6 +142,12 @@ export function groupEvents(events: EventMessage[]): Item[] {
         break;
       case "error":
         items.push({ type: "error", seq: e.seq, message: String(d.message ?? "Unknown error") });
+        break;
+      case "outputs":
+        items.push({
+          type: "outputs", seq: e.seq,
+          files: (d.files as OutputFile[]) ?? [], total: Number(d.total ?? 0),
+        });
         break;
       default:
         items.push({ type: "raw", seq: e.seq, data: d });

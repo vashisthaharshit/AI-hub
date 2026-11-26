@@ -24,6 +24,10 @@ class RunOptions:
     # Supervised mode: set by RunManager. Contains what the approval bridge
     # needs to reach AI-Hub (URL, run id, secret token). None = full access.
     approval_env: dict[str, str] | None = None
+    # App runs (Apps tab):
+    extra_env: dict[str, str] | None = None   # the app's settings + keys, for the agent's process
+    plugin_dirs: list[str] | None = None      # Claude Code plugins to load for this run only
+    accept_edits: bool = False                # with approvals: file edits don't ask, other actions do
 
 
 class AgentAdapter(ABC):

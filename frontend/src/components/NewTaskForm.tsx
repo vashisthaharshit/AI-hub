@@ -92,130 +92,136 @@ export function NewTaskForm({ agents, onCreated }: Props) {
   }
 
   return (
-    <form onSubmit={submit} className="mx-auto flex max-w-2xl flex-col gap-4 px-6 py-10">
-      <div>
-        <h2 className="text-xl font-semibold">New task</h2>
-        <p className="mt-1 text-sm text-zinc-400">
-          The agent works on its own branch in a separate copy of your repo. Your files and main branch stay untouched.
+    <div className="task-page">
+      <header className="task-intro">
+        <h2>New task</h2>
+        <p>
+          Give an agent a task in your Git repository. Each run gets its own branch and working copy.
         </p>
-      </div>
+      </header>
 
-      <label className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium">Agent</span>
-        {usable.length === 0 ? (
-          <p className="rounded bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
-            No usable agent found. Install and sign in to one, then press Re-check in the sidebar.
-          </p>
-        ) : (
-          <select
-            value={selectedId}
-            onChange={(e) => {
-              setAgentId(e.target.value);
-              setModel(""); // models differ per agent
-              setEffort("");
-            }}
-            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+      <form onSubmit={submit} className="task-composer">
+        <div className="task-fields">
+          <div className="task-agent-grid">
+            <label className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-sm font-medium">Agent</span>
+              {usable.length === 0 ? (
+                <p className="rounded bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+                  No usable agent found. Install and sign in to one, then press Re-check in the sidebar.
+                </p>
+              ) : (
+                <select
+                  value={selectedId}
+                  onChange={(e) => {
+                    setAgentId(e.target.value);
+                    setModel(""); // models differ per agent
+                    setEffort("");
+                  }}
+                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+                >
+                  {usable.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </label>
+
+            {selected && (
+              <div className="flex min-w-0 flex-col gap-1.5">
+                <span className="text-sm font-medium">Model</span>
+                <ModelPicker
+                  agent={selected}
+                  model={model}
+                  effort={effort}
+                  onChange={(m, e) => {
+                    setModel(m);
+                    setEffort(e);
+                  }}
+                />
+              </div>
+            )}
+          </div>
+
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium">Repository folder</span>
+            <input
+              value={repoPath}
+              onChange={(e) => changeRepo(e.target.value)}
+              list="recent-repos"
+              placeholder="D:\projects\my-app"
+              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-sm"
+            />
+            <datalist id="recent-repos">
+              {recent.map((p) => (
+                <option key={p} value={p} />
+              ))}
+            </datalist>
+            <span className="text-xs text-zinc-500">Must be a git repo with at least one commit.</span>
+          </label>
+
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium">Task</span>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void submit();
+              }}
+              rows={5}
+              placeholder="Add a /health endpoint that returns {status: 'ok'} and a test for it"
+              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+            />
+          </label>
+
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium">
+              Test command <span className="font-normal text-zinc-500">(optional)</span>
+            </span>
+            <input
+              value={testCommand}
+              onChange={(e) => setTestCommand(e.target.value)}
+              placeholder="pytest -q   or   npm test"
+              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-sm"
+            />
+            <span className="text-xs text-zinc-500">
+              Run by AI-Hub after each turn to check the agent's work. Remembered per repo.
+            </span>
+          </label>
+
+          <label className={`supervision-option ${canSupervise ? "" : "opacity-65"}`}>
+            <input
+              type="checkbox"
+              checked={canSupervise && supervised}
+              disabled={!canSupervise}
+              onChange={(e) => setSupervised(e.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-sky-500"
+            />
+            <span className="text-sm">
+              <span className="font-medium">Supervised</span>
+              <span className="block text-xs text-zinc-500">
+                {canSupervise
+                  ? "Ask for approval before file edits and commands."
+                  : "Available with agents that support approval prompts."}
+              </span>
+            </span>
+          </label>
+
+          {error && <p role="alert" className="rounded bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</p>}
+        </div>
+
+        <div className="task-footer">
+          <span className="keyboard-hint"><kbd>Ctrl</kbd> / <kbd>&#8984;</kbd> + <kbd>Enter</kbd></span>
+          <button
+            type="submit"
+            disabled={!canSubmit}
+            className="run-button"
           >
-            {usable.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-        )}
-      </label>
-
-      {selected && (
-        <label className="flex flex-col gap-1.5">
-          <span className="text-sm font-medium">Model</span>
-          <ModelPicker
-            agent={selected}
-            model={model}
-            effort={effort}
-            onChange={(m, e) => {
-              setModel(m);
-              setEffort(e);
-            }}
-          />
-        </label>
-      )}
-
-      <label className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium">Repository folder</span>
-        <input
-          value={repoPath}
-          onChange={(e) => changeRepo(e.target.value)}
-          list="recent-repos"
-          placeholder="D:\projects\my-app"
-          className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-sm"
-        />
-        <datalist id="recent-repos">
-          {recent.map((p) => (
-            <option key={p} value={p} />
-          ))}
-        </datalist>
-        <span className="text-xs text-zinc-500">Must be a git repo with at least one commit.</span>
-      </label>
-
-      <label className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium">Task</span>
-        <textarea
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void submit();
-          }}
-          rows={6}
-          placeholder="Add a /health endpoint that returns {status: 'ok'} and a test for it"
-          className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
-        />
-      </label>
-
-      <label className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium">
-          Test command <span className="font-normal text-zinc-500">(optional)</span>
-        </span>
-        <input
-          value={testCommand}
-          onChange={(e) => setTestCommand(e.target.value)}
-          placeholder="pytest -q   or   npm test"
-          className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-sm"
-        />
-        <span className="text-xs text-zinc-500">
-          Run by AI-Hub after each turn to check the agent's work. Remembered per repo.
-        </span>
-      </label>
-
-      <label className={`flex items-start gap-2.5 ${canSupervise ? "" : "opacity-50"}`}>
-        <input
-          type="checkbox"
-          checked={canSupervise && supervised}
-          disabled={!canSupervise}
-          onChange={(e) => setSupervised(e.target.checked)}
-          className="mt-0.5 h-4 w-4 accent-sky-500"
-        />
-        <span className="text-sm">
-          <span className="font-medium">Supervised</span>
-          <span className="block text-xs text-zinc-500">
-            {canSupervise
-              ? "Ask me before each file edit or command. Reading files is always allowed."
-              : `${selected?.name ?? "This agent"} can't pause for approval; it runs in its own sandbox instead.`}
-          </span>
-        </span>
-      </label>
-
-      {error && <p className="rounded bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</p>}
-
-      <div className="flex items-center gap-3">
-        <button
-          type="submit"
-          disabled={!canSubmit}
-          className="rounded-md bg-sky-600 px-4 py-2 text-sm font-medium hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {submitting ? "Starting..." : "Run"}
-        </button>
-        <span className="text-xs text-zinc-500">Ctrl + Enter</span>
-      </div>
-    </form>
+            {submitting ? "Starting..." : "Run task"} <span aria-hidden="true">&rarr;</span>
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }

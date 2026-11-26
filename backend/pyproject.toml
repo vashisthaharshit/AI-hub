@@ -8,6 +8,7 @@ dependencies = [
   "uvicorn[standard]>=0.30",
   "pydantic>=2.7",
   "keyring>=25",   # stores your own API keys in the OS keychain (Windows Credential Manager)
+  "uv>=0.5",       # sets up Python for connected apps (downloads the right Python version itself)
 ]
 
 [project.optional-dependencies]

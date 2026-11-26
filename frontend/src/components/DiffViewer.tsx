@@ -45,8 +45,8 @@ export default function DiffViewer({ runId, reloadKey }: { runId: string; reload
   const file = files.find((f) => f.path === selected) ?? files[0];
 
   return (
-    <div className="flex h-full min-h-0">
-      <ul className="w-64 shrink-0 overflow-y-auto border-r border-zinc-800 py-2">
+    <div className="flex h-full min-h-0 flex-col sm:flex-row">
+      <ul className="max-h-28 shrink-0 overflow-y-auto border-b border-zinc-800 py-2 sm:max-h-none sm:w-52 sm:border-r sm:border-b-0">
         {files.map((f) => (
           <li key={f.path}>
             <button
@@ -64,7 +64,7 @@ export default function DiffViewer({ runId, reloadKey }: { runId: string; reload
         ))}
       </ul>
 
-      <div className="min-w-0 flex-1">
+      <div className="min-h-0 min-w-0 flex-1">
         {file.binary || file.too_large ? (
           <p className="p-6 text-sm text-zinc-500">
             {file.binary ? "Binary file: no text preview." : "File too large to preview."}
