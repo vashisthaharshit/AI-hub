@@ -25,3 +25,7 @@ backend/scripts/probe_output.json
 
 # Screenshots / files saved by Claude while building (not part of the app)
 Claude outputs/
+
+# Fastec website files (separate project, not part of AI-Hub)
+Fastec */
+Fastec *

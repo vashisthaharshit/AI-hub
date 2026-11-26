@@ -509,3 +509,24 @@ class AppInfo(BaseModel):
     created_at: str
     updated_at: str
     manifest: AppManifest
+
+
+class AppUpdateCheck(BaseModel):
+    """How far the app's copy is behind GitHub (see apps/update.py)."""
+
+    behind: int                 # new changes (commits) on GitHub
+    ahead: int                  # commits only in this copy: can't update with a button
+    upstream: str               # e.g. origin/main
+    changes: list[str] = Field(default_factory=list)  # titles of the newest changes
+    local_changes: int = 0      # files the user changed or added (backed up first)
+    can_update: bool
+
+
+class AppUpdateResult(BaseModel):
+    updated: bool
+    message: str
+    check: AppUpdateCheck
+    backup: str | None = None   # backup folder
+    backed_up_files: int = 0
+    conflicts: list[str] = Field(default_factory=list)
+    app: AppInfo

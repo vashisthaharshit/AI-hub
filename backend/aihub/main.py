@@ -31,6 +31,8 @@ Endpoints
   POST /api/apps                       connect {url, folder} or {path}: clone + read the repo
   GET  /api/apps/{id}                  one app with its manifest (commands, tools it needs...)
   POST /api/apps/{id}/rescan           read the folder again
+  GET  /api/apps/{id}/updates          look on GitHub for a newer version (fetch, nothing changes)
+  POST /api/apps/{id}/update           back up the user's files, move to GitHub's version, read again
   DELETE /api/apps/{id}                remove from the Apps tab (the folder is NOT deleted)
   GET  /api/apps/{id}/guide            the Guide tab: saved AI guide if still current, else the basic one
   POST /api/apps/{id}/guide?force=false  write the guide with the cheapest model (slow) and save it
@@ -63,12 +65,14 @@ from aihub.apps import connect as apps
 from aihub.apps import files as app_files
 from aihub.apps import running as app_running
 from aihub.apps import tools
+from aihub.apps import update as app_update
 from aihub.apps.guide import GuideError, Guides
 from aihub.apps.setup_values import SetupError, SetupValues
 from aihub.agents.registry import default_registry
 from aihub.db import Database
 from aihub.models import (
-    AgentStatus, AppConnect, AppGuide, AppInfo, AppRequirement, AppRunCreate, AppTrust, OpenPath, SetupSave,
+    AgentStatus, AppConnect, AppGuide, AppInfo, AppRequirement, AppRunCreate, AppTrust, AppUpdateCheck,
+    AppUpdateResult, OpenPath, SetupSave,
     SetupView, ApprovalDecision, InstallJob, ApprovalRequest, BulkDelete, ChangedFile, FollowUp, KeyUpdate, RunCreate,
     RunInfo, SettingsView, SummarySettings, SummaryTest, UsageWindow,
 )
@@ -330,6 +334,19 @@ async def rescan_app(app_id: str):
     return await _call(do())
 
 
+@app.get("/api/apps/{app_id}/updates", response_model=AppUpdateCheck)
+async def check_app_updates(app_id: str):
+    return await _call(app_update.check(await get_app(app_id)))
+
+
+@app.post("/api/apps/{app_id}/update", response_model=AppUpdateResult)
+async def update_app(app_id: str):
+    found = await get_app(app_id)
+    if any(runs().is_active(r.id) for r in app.state.db.list_runs(50, kind="app", app_id=app_id)):
+        raise HTTPException(400, "Wait for the app's current run to finish (or stop it), then update.")
+    return await _call(app_update.update(found, app.state.db))
+
+
 @app.delete("/api/apps/{app_id}")
 async def forget_app(app_id: str):
     """Only removes it from the list. The folder may hold the user's own
@@ -369,16 +386,21 @@ async def save_setup(app_id: str, body: SetupSave):
 async def run_app(app_id: str, body: AppRunCreate):
     found = await get_app(app_id)
     m = found.manifest
-    agent_id = body.agent_id or app_running.AGENT_IDS.get(m.primary_agent or "claude", "claude-code")
+    command = None
+    if body.command:
+        command = next((c for c in m.commands if c.name == body.command), None)
+        if not command:
+            raise HTTPException(404, f"This app has no command '{body.command}'")
+    # A command runs with the agent it was written for (a Codex skill with
+    # Codex), unless the request picks one.
+    default = command.agent if command else (m.primary_agent or "claude")
+    agent_id = body.agent_id or app_running.AGENT_IDS.get(default, "claude-code")
     try:
         adapter = app.state.registry.get(agent_id)
     except KeyError as exc:
         raise HTTPException(404, exc.args[0]) from None
 
-    if body.command:
-        command = next((c for c in m.commands if c.name == body.command), None)
-        if not command:
-            raise HTTPException(404, f"This app has no command '{body.command}'")
+    if command:
         if (command.money or m.setup.always_ask) and not adapter.supports_supervised:
             raise HTTPException(400, f"{adapter.name} can't stop to ask you before orders or payments. "
                                      "Use Claude Code for this app.")

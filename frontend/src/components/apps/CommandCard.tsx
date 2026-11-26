@@ -60,9 +60,16 @@ export function CommandCard({ appId, command: c, form, highlighted, busy, onRun 
         )}
         <div className="flex items-start justify-between gap-2">
           <p className="text-sm font-semibold">{form?.title ?? c.title}</p>
-          <code className="shrink-0 truncate text-[11px] text-zinc-600" title={c.from_skill ? "A skill you can start like a command" : c.source}>
-            {c.invoke || `/${c.name}`}
-          </code>
+          <span className="flex shrink-0 items-center gap-1.5">
+            {c.agent === "codex" && (
+              <span className="rounded border border-zinc-700 px-1 text-[10px] text-zinc-400" title="A Codex skill: runs with Codex">
+                Codex
+              </span>
+            )}
+            <code className="truncate text-[11px] text-zinc-600" title={c.from_skill ? "A skill you can start like a command" : c.source}>
+              {c.invoke || `/${c.name}`}
+            </code>
+          </span>
         </div>
         {(form?.description ?? c.description) && (
           <p className="mt-0.5 text-xs text-zinc-400">{form?.description ?? c.description}</p>

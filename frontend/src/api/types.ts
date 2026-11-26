@@ -196,7 +196,7 @@ export interface AppCommand {
   agent: "claude" | "codex";
   source: string; // file it came from
   from_skill: boolean; // a skill the repo tells users to type (/scrape)
-  invoke: string; // exactly what is typed: "/apply" or "/day-trader-skill:trader-scanner"
+  invoke: string; // exactly what is typed: "/apply", "/day-trader-skill:trader-scanner" or a Codex skill "$scan"
   plugin: string | null;
   money: boolean; // can move money: always asks first
 }
@@ -316,6 +316,26 @@ export interface AppInfo {
   created_at: string;
   updated_at: string;
   manifest: AppManifest;
+}
+
+// "Update repo": how far the app's copy is behind GitHub (backend apps/update.py)
+export interface AppUpdateCheck {
+  behind: number; // new changes on GitHub
+  ahead: number; // commits only in this copy: can't update with a button
+  upstream: string; // e.g. origin/main
+  changes: string[]; // titles of the newest changes
+  local_changes: number; // files the user changed or added (backed up first)
+  can_update: boolean;
+}
+
+export interface AppUpdateResult {
+  updated: boolean;
+  message: string;
+  check: AppUpdateCheck;
+  backup: string | null; // backup folder
+  backed_up_files: number;
+  conflicts: string[];
+  app: AppInfo;
 }
 
 export interface AppConnect {

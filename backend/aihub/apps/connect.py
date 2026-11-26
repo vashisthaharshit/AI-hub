@@ -50,7 +50,7 @@ def parse_repo_url(url: str) -> tuple[str, str]:
     raise AppError("That doesn't look like a GitHub link. Example: https://github.com/owner/repo")
 
 
-async def _git(*args: str, cwd: Path | None = None) -> str:
+async def _git(*args: str, cwd: Path | None = None, strip: bool = True) -> str:
     # GIT_TERMINAL_PROMPT=0: for a private repo without saved sign-in, fail
     # with a message instead of waiting forever for a password nobody sees.
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
@@ -64,7 +64,8 @@ async def _git(*args: str, cwd: Path | None = None) -> str:
     out, err = await proc.communicate()
     if proc.returncode != 0:
         raise AppError(err.decode(errors="replace").strip() or f"git {args[0]} failed")
-    return out.decode(errors="replace").strip()
+    text = out.decode(errors="replace")
+    return text.strip() if strip else text  # porcelain output starts with a meaningful space
 
 
 async def _origin(folder: Path) -> str | None:

@@ -4,8 +4,10 @@ and what came out.
   build_prompt   a card's answers -> the text the agent gets
                    Claude Code: "/apply https://..." (its own slash command,
                    plugin ones as /<plugin>:<skill>)
-                   Codex: has no slash commands for these repos, so it gets
-                   the command file's instructions with $ARGUMENTS filled in
+                   Codex: its own skills (.agents/skills) as "$skill ...";
+                   for Claude-format commands it gets the command file's
+                   instructions with $ARGUMENTS filled in (and the other way
+                   round for a Codex skill run with Claude Code)
   context        environment (settings + keys + uv on PATH), plugin folders
                  to load, the approval policy (trusted? money tools?)
   snapshot/diff  which files a turn created or changed in the app's folder,
@@ -63,10 +65,14 @@ def build_prompt(app: AppInfo, command: AppCommand, form: CommandForm | None, va
         raise AppRunError(f"Please fill in: {', '.join(missing)}")
     answers = answers_text(form, values)
     argument = fill_argument(form.argument, answers) if form else str(answers.get("value") or "").strip()
-    if agent == "claude-code":
+    if agent == "claude-code" and command.agent == "claude":
         return f"{command.invoke or '/' + command.name} {argument}".strip()
+    if agent == "codex" and command.from_skill and any(
+            s.agent == "codex" and s.name == command.name for s in app.manifest.skills):
+        # Codex finds the repo's skills in .agents/skills; `$name` starts one.
+        return f"${command.name} {argument}".strip()
 
-    # Codex: the command's own instructions, with its placeholders filled in.
+    # The other agent: the command's own instructions, with its placeholders filled in.
     try:
         _, body = parse_frontmatter((Path(app.path) / command.source).read_text(encoding="utf-8", errors="replace"))
     except OSError:
@@ -74,8 +80,9 @@ def build_prompt(app: AppInfo, command: AppCommand, form: CommandForm | None, va
     words = argument.split()
     body = body.replace("$ARGUMENTS", argument)
     body = re.sub(r"\$([1-9])\b", lambda m: words[int(m.group(1)) - 1] if int(m.group(1)) <= len(words) else "", body)
+    written_for = "Codex" if command.agent == "codex" else "Claude Code"
     return (f"Follow these instructions. They are this repo's `{command.name}` command "
-            f"(written for Claude Code; adapt any Claude-only steps).\n\n{body.strip()}")
+            f"(written for {written_for}; adapt any {written_for}-only steps).\n\n{body.strip()}")
 
 
 # ---------- the run's settings ----------

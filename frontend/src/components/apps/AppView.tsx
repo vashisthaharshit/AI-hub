@@ -1,8 +1,9 @@
 // One connected app, in three tabs:
 //   Guide            for beginners: what it does, what to ask, how to start, a box to type in
 //   Commands         one card per command, for people who know what they want
-//   Setup & details  tools it needs (with Install) and what the repo lets the agent do
-// Running a command is the next step; for now the Run / Go buttons are off.
+//   Activity         the runs of this app
+//   Setup & details  setup form, tools it needs (with Install), what the repo lets the agent do,
+//                    and Update (newest version from GitHub, with a backup first)
 
 import { useCallback, useEffect, useState } from "react";
 import { api, errorText } from "../../api/client";
@@ -13,6 +14,7 @@ import { CommandCard } from "./CommandCard";
 import { GuidePanel } from "./GuidePanel";
 import { SetupPanel } from "./SetupPanel";
 import { ToolsPanel } from "./ToolsPanel";
+import { UpdatePanel } from "./UpdatePanel";
 import { useGuide } from "./useGuide";
 
 const AGENT_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex" };
@@ -199,8 +201,11 @@ export function AppView({ appId, onChanged, onRemoved }: Props) {
       {current === "commands" && (
         <section>
           <p className="mb-3 text-xs text-zinc-500">
-            Each card runs one of the repo's commands with {AGENT_NAMES[m.primary_agent ?? ""] ?? "the agent"}, in this
-            app's folder. You'll see what it does in the Activity tab.
+            Each card runs one of the repo's commands with{" "}
+            {new Set(m.commands.map((c) => c.agent)).size > 1
+              ? "the agent it was made for (marked on Codex cards)"
+              : AGENT_NAMES[m.commands[0]?.agent ?? m.primary_agent ?? ""] ?? "the agent"}
+            , in this app's folder. You'll see what it does in the Activity tab.
             {guideState.writing && " Making the cards simpler..."}
           </p>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -269,6 +274,16 @@ export function AppView({ appId, onChanged, onRemoved }: Props) {
             />
           )}
           <PermissionsSection permissions={m.permissions} />
+          {app.url && (
+            <UpdatePanel
+              appId={appId}
+              busy={runBusy}
+              onUpdated={(updated) => {
+                setApp(updated);
+                onChanged();
+              }}
+            />
+          )}
         </>
       )}
 

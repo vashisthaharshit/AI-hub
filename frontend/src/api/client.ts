@@ -3,7 +3,7 @@
 // in dev, Vite's proxy forwards them; in production, the backend serves the UI.
 
 import type {
-  AgentStatus, AppConnect, AppGuide, AppInfo, AppRunCreate, SetupView, AppRequirement, ChangedFile, InstallJob, RunCreate, RunInfo, SettingsView,
+  AgentStatus, AppConnect, AppGuide, AppInfo, AppRunCreate, AppUpdateCheck, AppUpdateResult, SetupView, AppRequirement, ChangedFile, InstallJob, RunCreate, RunInfo, SettingsView,
   SummarySettings, SummaryTest,
 } from "./types";
 
@@ -87,6 +87,9 @@ export const api = {
     }),
   connectApp: (body: AppConnect) => request<AppInfo>("/api/apps", { method: "POST", body: JSON.stringify(body) }),
   rescanApp: (id: string) => request<AppInfo>(`/api/apps/${id}/rescan`, { method: "POST" }),
+  // Looks on GitHub (fetch only, nothing changes); then update = backup + move to GitHub's version.
+  checkAppUpdates: (id: string) => request<AppUpdateCheck>(`/api/apps/${id}/updates`),
+  updateApp: (id: string) => request<AppUpdateResult>(`/api/apps/${id}/update`, { method: "POST" }),
   forgetApp: (id: string) => request<{ deleted: boolean }>(`/api/apps/${id}`, { method: "DELETE" }),
   guide: (id: string) => request<AppGuide>(`/api/apps/${id}/guide`),
   // Slow (the cheapest model writes it); returns the saved guide at once if still current.

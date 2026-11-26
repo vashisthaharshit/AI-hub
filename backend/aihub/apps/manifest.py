@@ -8,7 +8,8 @@ What we look for
   .claude/commands/**/*.md     Claude Code slash commands  -> buttons
   .claude/skills/*/SKILL.md    Claude Code skills; also buttons when the repo tells
                                users to type them (`/scrape` in ai-job-search)
-  .agents/skills/*/SKILL.md    Codex skills
+  .agents/skills/*/SKILL.md    Codex skills; buttons by the same rule, started as
+                               `$<name>` (how Codex runs a skill on purpose)
   .claude-plugin/*.json        a Claude Code plugin: its skills/, commands/, .mcp.json
                                (buttons become /<plugin>:<name>; see plugins.py)
   CLAUDE.md / AGENTS.md        instructions each agent reads at start
@@ -259,6 +260,11 @@ def _mentions_slash(text: str, name: str) -> bool:
     return re.search(rf"(?<![\w/]){re.escape('/' + name)}(?![\w-])", text) is not None
 
 
+def _mentions_dollar(text: str, name: str) -> bool:
+    """Codex skills are typed as `$name`."""
+    return re.search(rf"(?<![\w$]){re.escape('$' + name)}(?![\w-])", text) is not None
+
+
 def skills_as_commands(skills: list[AppSkill], readme: str, taken: set[str], all_skills: bool = False) -> list[AppCommand]:
     """Claude Code skills can be started like commands (`/scrape`).
 
@@ -270,19 +276,29 @@ def skills_as_commands(skills: list[AppSkill], readme: str, taken: set[str], all
     and stay off the button list.
     """
     commands = []
-    for skill in skills:
-        if skill.agent != "claude" or not skill.user_invocable or skill.name in taken:
+    taken = set(taken)
+    # Claude skills first: when both agents have a skill with the same name,
+    # the button is the Claude one (and a Codex run still uses `$name`, see
+    # running.build_prompt).
+    for skill in sorted(skills, key=lambda s: s.agent != "claude"):
+        if not skill.user_invocable or skill.name in taken:
             continue
-        told = _mentions_slash(skill.raw_description, skill.name) or _mentions_slash(readme, skill.name)
+        told = any(f(t, skill.name) for f in (_mentions_slash, _mentions_dollar)
+                   for t in (skill.raw_description, readme))
         if not (told or all_skills):
             continue
         mode, hint = input_mode(None, skill.body)
+        if skill.agent == "codex":
+            invoke = f"${skill.name}"
+        else:
+            invoke = f"/{skill.plugin}:{skill.name}" if skill.plugin else f"/{skill.name}"
         commands.append(AppCommand(
             name=skill.name, title=_title(skill.name), description=skill.description,
             argument_hint=hint, input=mode, kind=_command_kind(skill.name),
-            agent="claude", source=skill.source, from_skill=True, plugin=skill.plugin,
-            invoke=f"/{skill.plugin}:{skill.name}" if skill.plugin else f"/{skill.name}",
+            agent=skill.agent, source=skill.source, from_skill=True, plugin=skill.plugin,
+            invoke=invoke,
         ))
+        taken.add(skill.name)
     return commands
 
 
@@ -477,7 +493,10 @@ def build_manifest(repo: Path, which: Callable[[str], str | None] | None = None)
         agents.append("codex")
 
     if commands:
-        tier, primary = 1, "claude"   # slash commands are Claude Code's format
+        # Slash commands are Claude Code's format; a repo whose buttons are all
+        # Codex skills is a Codex app.
+        tier = 1
+        primary = "claude" if any(c.agent == "claude" for c in commands) else "codex"
     elif agents:
         tier, primary = 2, agents[0]
     else:
