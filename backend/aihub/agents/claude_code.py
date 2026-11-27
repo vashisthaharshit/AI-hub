@@ -35,6 +35,10 @@ from aihub.models import AccountInfo, AgentEvent, AgentStatus, Discovery, ModelO
 
 MAX_TOOL_OUTPUT_CHARS = 20_000
 APPROVAL_TOOL = "mcp__aihub__approve"  # mcp__<server name>__<tool name>
+MEMORY_SERVER = "aihub_memory"         # Brain steps: project memory tools (brain/memory_mcp.py)
+# What a Brain step may do without asking (see build_command).
+STEP_ALLOWED_TOOLS = f"Bash,PowerShell,mcp__{MEMORY_SERVER}"
+STEP_BLOCKED_TOOLS = "Bash(git commit:*),Bash(git push:*),PowerShell(git commit:*),PowerShell(git push:*)"
 # How long Claude waits for an MCP tool (ms). The user may take a while to decide.
 APPROVAL_TIMEOUT_MS = str(30 * 60 * 1000)
 
@@ -111,7 +115,15 @@ class ClaudeCodeAdapter(AgentAdapter):
 
     def build_command(self, path: str, options: RunOptions, mcp_config: Path | None = None) -> list[str]:
         cmd = [path, "-p", "--output-format", "stream-json", "--verbose"]
-        if mcp_config:
+        if mcp_config and options.memory_env and not options.approval_env:
+            # Brain steps run unattended in their own copy of the repo, so
+            # nobody can answer a prompt: edits, shell commands (to run
+            # tests and builds) and the memory tools are allowed up front.
+            # git commit/push stay blocked: AI-Hub handles git itself.
+            cmd += ["--permission-mode", "acceptEdits", "--mcp-config", str(mcp_config),
+                    "--allowedTools", STEP_ALLOWED_TOOLS,
+                    "--disallowedTools", STEP_BLOCKED_TOOLS]
+        elif mcp_config:
             # Supervised: normal permission rules; anything that needs a
             # permission prompt is sent to our approval tool instead.
             # App runs use acceptEdits: editing files in the app's folder is
@@ -148,8 +160,10 @@ class ClaudeCodeAdapter(AgentAdapter):
             yield AgentEvent(kind="error", data={"message": "Claude Code is not installed."})
             return
 
-        mcp_config = _write_mcp_config(options.approval_env) if options.approval_env else None
-        extra_env = {**(options.extra_env or {}), **({"MCP_TOOL_TIMEOUT": APPROVAL_TIMEOUT_MS} if mcp_config else {})}
+        mcp_config = (_write_mcp_config(options.approval_env, options.memory_env)
+                      if options.approval_env or options.memory_env else None)
+        timeout = {"MCP_TOOL_TIMEOUT": APPROVAL_TIMEOUT_MS} if options.approval_env else {}
+        extra_env = {**(options.extra_env or {}), **timeout}
         try:
             async for line in stream_lines(self.build_command(path, options, mcp_config), workdir, prompt, extra_env):
                 for event in parse_line(line):
@@ -161,8 +175,9 @@ class ClaudeCodeAdapter(AgentAdapter):
                 mcp_config.unlink(missing_ok=True)
 
 
-def _write_mcp_config(approval_env: dict[str, str]) -> Path:
-    """Tell Claude Code how to start our approval MCP server.
+def _write_mcp_config(approval_env: dict[str, str] | None, memory_env: dict[str, str] | None = None) -> Path:
+    """Tell Claude Code how to start our MCP servers: the approval bridge
+    (supervised mode) and/or the project memory tools (Brain steps).
 
     Written to a file (not passed inline as JSON) because quotes and braces
     in command-line arguments get mangled on Windows.
@@ -170,16 +185,17 @@ def _write_mcp_config(approval_env: dict[str, str]) -> Path:
     folder = config.DATA_DIR / "mcp"
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{uuid.uuid4().hex}.json"
-    path.write_text(json.dumps({
-        "mcpServers": {
-            "aihub": {
-                # The same Python that runs AI-Hub, so the aihub package is importable.
-                "command": sys.executable,
-                "args": ["-m", "aihub.approval_mcp"],
-                "env": approval_env,
-            }
+    servers = {}
+    if approval_env:
+        servers["aihub"] = {
+            # The same Python that runs AI-Hub, so the aihub package is importable.
+            "command": sys.executable,
+            "args": ["-m", "aihub.approval_mcp"],
+            "env": approval_env,
         }
-    }), encoding="utf-8")
+    if memory_env:
+        servers[MEMORY_SERVER] = {"command": sys.executable, "args": ["-m", "aihub.brain.memory_mcp"], "env": memory_env}
+    path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
     return path
 
 

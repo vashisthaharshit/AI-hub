@@ -59,7 +59,7 @@ def test_effort():
     p = plan(step("e", "easy", ["a"]), step("m", "medium", ["b"]), step("h", "hard", ["c"]))
     router.route(p, [claude()], "balanced")
     by = {s.id: s.assignment.effort for s in p.steps}
-    assert (by["e"], by["m"], by["h"]) == ("low", None, "high")
+    assert (by["e"], by["m"], by["h"]) == ("low", "medium", "high")   # always explicit (Codex defaults to low)
     router.route(p, [claude()], "best")
     assert {s.id: s.assignment.effort for s in p.steps}["h"] == "xhigh"
 
@@ -116,3 +116,45 @@ def test_user_choice_wins_while_usable():
     assert p.steps[0].assignment.model == "gpt-5.1-codex-max"
     notes = router.route(p, [claude()], "cheapest")               # Codex is gone now
     assert notes and p.steps[0].assignment.agent_id == "claude-code" and not p.steps[0].assignment.manual
+
+
+def opt(id_, label, description=None):
+    return ModelOption(id=id_, label=label, description=description, efforts=EFFORTS)
+
+
+# What the agents really report (from scripts/probe_models.py): Codex's names don't
+# say their size, the descriptions do; both lists include older generations.
+REAL_CODEX = [opt("gpt-6.2-sol", "GPT-6.2-Sol", "Fast, go-to model for coding and everyday work."),
+              opt("gpt-6.2-astra", "GPT-6.2-Astra", "Our most capable model for complex coding and professional work."),
+              opt("gpt-6.1-terra", "GPT-6.1 Terra", "Efficient model that excels at visual understanding and computer use."),
+              opt("gpt-6-astra", "GPT-6-Astra", "Previous generation model for complex coding and professional work."),
+              opt("gpt-6-luna", "GPT-6-Luna", "Fast and affordable model for easier tasks."),
+              opt("gpt-5.6-luna", "GPT-5.6-Luna", "Legacy fast model for simpler tasks.")]
+REAL_CLAUDE = [opt("default", "Default (recommended)", "Opus 5.5 · Best for everyday, complex tasks"),
+               opt("opus", "Opus 5.5", "For complex work and everyday tasks"),
+               opt("sonnet", "Sonnet 5.5", "Most efficient for simpler tasks"),
+               opt("fable", "Fable 5.2", "For your toughest challenges"),
+               opt("haiku", "Haiku 5.5", "Fastest for quick answers"),
+               opt("claude-haiku-4-5-20251001", "Haiku 4.5", "Fastest for quick answers"),
+               opt("claude-opus-4-8", "Opus 4.8", "Best for everyday, complex tasks")]
+
+
+def pick(models, mode, difficulty):
+    agent = AgentStatus(id="a", name="A", state="ready", models=models)
+    p = plan(step("s", difficulty, ["x"]))
+    router.route(p, [agent], mode)
+    return p.steps[0].assignment.model
+
+
+def test_real_codex_models_by_description():
+    assert [pick(REAL_CODEX, "balanced", d) for d in ("easy", "medium", "hard")] == ["gpt-6-luna", "gpt-6.2-sol", "gpt-6.2-astra"]
+    assert router.size_of(REAL_CODEX[3]) == 2 and router.is_old(REAL_CODEX[3])     # previous generation: never picked
+
+
+def test_real_claude_models_newest_and_top_only_when_wanted():
+    assert [pick(REAL_CLAUDE, "balanced", d) for d in ("easy", "medium", "hard")] == ["haiku", "sonnet", "opus"]
+    assert pick(REAL_CLAUDE, "best", "hard") == "fable"                               # the top model: Best + hard only
+    assert router.size_of(REAL_CLAUDE[0]) == 2                                        # "default" is Opus
+    up = router.step_up(StepAssignment(agent_id="a", agent_name="A", model="sonnet", model_label="", reason="",
+                                       manual=False), [AgentStatus(id="a", name="A", state="ready", models=REAL_CLAUDE)])
+    assert up.model == "opus"

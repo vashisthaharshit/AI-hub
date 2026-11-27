@@ -56,6 +56,13 @@ Endpoints
   GET/PUT /api/settings/brain          {mode}: the default Cost vs quality for new tasks
   POST /api/brain/tasks/{id}/direct    "Just do it": no plan, one agent
   DELETE /api/brain/tasks/{id}
+  POST /api/brain/tasks/{id}/run       run the plan (or continue a stopped one)
+  POST /api/brain/tasks/{id}/answer    {action, briefs}: when the plan waits for you
+  POST /api/brain/tasks/{id}/stop | keep | discard
+  GET  /api/brain/tasks/{id}/files | notes   the plan's changes; what its agents noted
+  GET  /api/brain/learning             what the Brain learned from past steps
+  GET  /api/workspaces/{id}/notes      project memory (DELETE .../notes/{note_id} to forget one)
+  POST /api/internal/memory            used by the memory tool server, not the UI
   GET  /api/apps/{id}/tools            look again for the tools the app needs (fresh, not cached)
   POST /api/tools/{tool}/install       install a tool with winget (one at a time)
   GET  /api/tools/installs/{job}?after=-1  install progress + new log lines (poll this)
@@ -79,6 +86,9 @@ from aihub.apps import files as app_files
 from aihub.apps import running as app_running
 from aihub.apps import tools
 from aihub.apps import update as app_update
+from aihub.brain import learning
+from aihub.brain.executor import BrainRunner
+from aihub.brain.memory import Memory
 from aihub.brain.tasks import Brain, BrainError
 from aihub.apps.guide import GuideError, Guides
 from aihub.apps.setup_values import SetupError, SetupValues
@@ -86,7 +96,7 @@ from aihub.agents.registry import default_registry
 from aihub.db import Database
 from aihub.models import (
     AgentStatus, AppConnect, AppGuide, AppInfo, AppRequirement, AppRunCreate, AppTrust, AppUpdateCheck,
-    AppUpdateResult, BrainCreate, BrainPlanRequest, BrainSettings, BrainTask, BrainTaskEdit, OpenPath, SetupSave,
+    AppUpdateResult, BrainAnswer, BrainCreate, BrainLearning, BrainPlanRequest, BrainSettings, BrainTask, BrainTaskEdit, MemoryNote, OpenPath, SetupSave,
     SetupView, ApprovalDecision, InstallJob, ApprovalRequest, BulkDelete, ChangedFile, FollowUp, KeyUpdate, RunCreate,
     RunInfo, SettingsView, SummarySettings, SummaryTest, UsageWindow, Workspace, WorkspaceCreate, WorkspaceEdit,
 )
@@ -113,9 +123,13 @@ async def lifespan(app: FastAPI):
     app.state.guides = Guides(db, app.state.summarizer, app.state.registry)
     app.state.setup_values = SetupValues(db, app.state.secrets)
     app.state.brain = Brain(db, app.state.summarizer, app.state.registry)
+    app.state.memory = Memory(db)
+    app.state.brain_runner = BrainRunner(db, app.state.runs, app.state.registry, app.state.brain, app.state.memory)
+    app.state.brain_runner.recover()   # plans that were running when AI-Hub closed
     workspaces.adopt_orphans(db)   # chats made before workspaces existed
     yield
-    # ...and once at shutdown: stop running agents, close the database.
+    # ...and once at shutdown: stop running plans and agents, close the database.
+    await app.state.brain_runner.shutdown()
     await app.state.runs.shutdown()
     db.close()
 
@@ -402,10 +416,93 @@ async def brain_task_direct(task_id: str):
     return await _call(app.state.brain.run_directly(task_id))
 
 
+# ---------- Brain: running a plan ----------
+
+def brain_runner() -> BrainRunner:
+    return app.state.brain_runner
+
+
+@app.post("/api/brain/tasks/{task_id}/run", response_model=BrainTask)
+async def run_brain_task(task_id: str):
+    """Start the plan, or continue a stopped one from where it stopped. Returns at once."""
+    return await _call(brain_runner().start(task_id))
+
+
+@app.post("/api/brain/tasks/{task_id}/answer", response_model=BrainTask)
+async def answer_brain_task(task_id: str, body: BrainAnswer):
+    """While the plan waits: continue (approve the next steps), retry, skip, or stop."""
+    return await _call(brain_runner().answer(task_id, body))
+
+
+@app.post("/api/brain/tasks/{task_id}/stop", response_model=BrainTask)
+async def stop_brain_task(task_id: str):
+    return await _call(brain_runner().stop(task_id))
+
+
+@app.post("/api/brain/tasks/{task_id}/keep", response_model=BrainTask)
+async def keep_brain_task(task_id: str):
+    """The branch stays (merge it yourself); the task's notes become project memory."""
+    return await _call(brain_runner().keep(task_id))
+
+
+@app.post("/api/brain/tasks/{task_id}/discard", response_model=BrainTask)
+async def discard_brain_task(task_id: str):
+    return await _call(brain_runner().discard(task_id))
+
+
+@app.get("/api/brain/tasks/{task_id}/files", response_model=list[ChangedFile])
+async def brain_task_files(task_id: str):
+    """Everything the plan changed so far, for the diff view."""
+    return await _call(brain_runner().files(task_id))
+
+
+@app.get("/api/brain/tasks/{task_id}/notes", response_model=list[MemoryNote])
+async def brain_task_notes(task_id: str):
+    async def do():
+        task = app.state.brain.get(task_id)
+        folder = task.execution.worktree_path if task.execution and task.execution.worktree_path else task.repo_path
+        return app.state.memory.notes(workspace_id=None, task_id=task.id, folder=Path(folder), scope="task")
+    return await _call(do())
+
+
+@app.get("/api/brain/learning", response_model=BrainLearning)
+async def brain_learning():
+    return learning.summary(app.state.db)
+
+
+@app.get("/api/workspaces/{ws_id}/notes", response_model=list[MemoryNote])
+async def workspace_notes(ws_id: str):
+    """Project memory: what agents learned about this repo in kept Brain tasks."""
+    async def do():
+        ws = workspaces.get(app.state.db, ws_id)
+        return app.state.memory.notes(workspace_id=ws.id, folder=Path(ws.repo_path), scope="repo")
+    return await _call(do())
+
+
+@app.delete("/api/workspaces/{ws_id}/notes/{note_id}")
+async def delete_workspace_note(ws_id: str, note_id: str):
+    return {"deleted": app.state.db.delete_notes(note_id=note_id) > 0}
+
+
+@app.post("/api/internal/memory")
+async def memory_tool(body: dict):
+    """Used by the project-memory tool server (brain/memory_mcp.py) during a Brain step."""
+    try:
+        text = await brain_runner().memory_tool(str(body.get("token", "")), str(body.get("tool", "")),
+                                                body.get("args") if isinstance(body.get("args"), dict) else {})
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
+    return {"text": text}
+
+
 @app.delete("/api/brain/tasks/{task_id}")
 async def delete_brain_task(task_id: str):
     async def do():
-        app.state.brain.get(task_id)
+        task = app.state.brain.get(task_id)
+        if brain_runner().is_running(task_id):
+            raise BrainError("The plan is running. Stop it first.")
+        if task.execution and task.execution.state not in ("kept", "discarded"):
+            raise BrainError("This plan has work in progress. Keep or discard it first.")
         app.state.db.delete_brain_task(task_id)
         return {"deleted": True}
     return await _call(do())

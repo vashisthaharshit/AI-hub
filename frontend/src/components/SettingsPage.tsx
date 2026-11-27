@@ -9,7 +9,7 @@
 
 import { useEffect, useState } from "react";
 import { api, errorText } from "../api/client";
-import type { AgentStatus, BrainMode, SettingsView, SummaryProvider, SummarySettings, SummaryTest } from "../api/types";
+import type { AgentStatus, BrainLearning, BrainMode, SettingsView, SummaryProvider, SummarySettings, SummaryTest } from "../api/types";
 import { isUsable } from "../hooks/useAgents";
 import { MODES } from "./brain/BrainNewTask";
 import { ModelPicker } from "./ModelSelect";
@@ -261,6 +261,7 @@ export function SettingsPage({ agents }: { agents: AgentStatus[] }) {
       </div>
 
       <BrainDefaults />
+      <BrainLearningPanel />
     </div>
   );
 }
@@ -310,6 +311,67 @@ function BrainDefaults() {
       </div>
       {saved && <p className="text-xs text-emerald-400">Saved</p>}
       {error && <p className="text-sm text-red-300">{error}</p>}
+    </section>
+  );
+}
+
+// What the Brain learned from past steps: how each model size did on each kind
+// of step, and what the router now does differently because of it.
+function BrainLearningPanel() {
+  const [data, setData] = useState<BrainLearning | null>(null);
+  useEffect(() => {
+    api.brainLearning().then(setData).catch(() => setData(null));
+  }, []);
+  if (!data) return null;
+  const overrides = Object.entries(data.triage_overrides);
+  return (
+    <section className="mt-6 space-y-3 border-t border-zinc-800 pt-6">
+      <div>
+        <h3 className="text-base font-semibold">Brain: what it learned</h3>
+        <p className="mt-1 text-sm text-zinc-400">
+          Every step's result is saved. Once a smaller model reliably passes a kind of step, the Brain uses it (cheaper);
+          if a model keeps failing one, it picks a bigger one.
+        </p>
+      </div>
+      {data.stats.length === 0 ? (
+        <p className="history-empty">Nothing yet. Run a few Brain plans and the results show up here.</p>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-zinc-800">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-zinc-900 text-xs text-zinc-500">
+              <tr>
+                <th className="px-3 py-2 font-medium">Kind of step</th>
+                <th className="px-3 py-2 font-medium">Model size</th>
+                <th className="px-3 py-2 font-medium">Passed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.stats.map((s) => (
+                <tr key={`${s.step_type}-${s.difficulty}-${s.tier}`} className="border-t border-zinc-800">
+                  <td className="px-3 py-2">{s.difficulty} {s.step_type}</td>
+                  <td className="px-3 py-2 text-zinc-400">{s.tier}</td>
+                  <td className="px-3 py-2">
+                    <span className={s.passed / s.total >= 0.85 ? "text-emerald-300" : s.passed / s.total < 0.6 ? "text-red-300" : ""}>
+                      {s.passed} of {s.total}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {data.adjustments.length > 0 && (
+        <ul className="list-disc space-y-0.5 pl-5 text-sm text-zinc-300">
+          {data.adjustments.map((a) => <li key={a}>{a}</li>)}
+        </ul>
+      )}
+      {overrides.length > 0 && (
+        <p className="text-xs text-zinc-500">
+          You changed the Brain's small/big call {overrides.reduce((n, [, v]) => n + v, 0)} times
+          ({overrides.map(([k, v]) => `${k === "small_to_plan" ? "planned a small task" : "ran a big task directly"}: ${v}`).join(", ")}).
+        </p>
+      )}
     </section>
   );
 }

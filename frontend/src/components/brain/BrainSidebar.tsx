@@ -4,6 +4,15 @@ import { useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { BrainTask } from "../../api/types";
 
+const RUN_LABEL: Record<string, string> = {
+  running: "Running…",
+  waiting: "Waiting for you",
+  done: "Done, ready to review",
+  stopped: "Stopped",
+  failed: "Needs a look",
+  kept: "Kept",
+};
+
 const STATE_LABEL: Record<BrainTask["state"], string> = {
   direct: "Run directly",
   asking: "Questions for you",
@@ -23,7 +32,14 @@ export function BrainSidebar({ workspaceId, selectedId, creating, refreshKey, on
   const [tasks, setTasks] = useState<BrainTask[] | null>(null);
 
   useEffect(() => {
-    api.brainTasks(workspaceId).then(setTasks).catch(() => setTasks([]));
+    let active = true;
+    const load = () => api.brainTasks(workspaceId).then((t) => active && setTasks(t)).catch(() => active && setTasks([]));
+    void load();
+    const timer = setInterval(load, 4000); // plans running in the background change state
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
   }, [refreshKey, workspaceId]);
 
   return (
@@ -47,9 +63,19 @@ export function BrainSidebar({ workspaceId, selectedId, creating, refreshKey, on
                   className="chat-item"
                 >
                   <span className="block truncate text-sm font-medium">{t.request.split("\n")[0]}</span>
-                  <span className="block text-xs text-zinc-500">
-                    {STATE_LABEL[t.state]}
-                    {t.plan && t.state === "planned" && ` · ${t.plan.steps.length} steps`}
+                  <span className="flex items-center gap-1.5 text-xs text-zinc-500">
+                    {t.execution && t.execution.state !== "discarded" ? (
+                      <>
+                        <span className="live-dot" data-live={t.execution.state === "running"}
+                          style={{ ["--dot" as string]: t.execution.state === "waiting" ? "#f2b25a" : t.execution.state === "running" ? "var(--color-brain)" : t.execution.state === "done" || t.execution.state === "kept" ? "#4ade9b" : "#7f89ab" }} />
+                        {RUN_LABEL[t.execution.state] ?? t.execution.state}
+                      </>
+                    ) : (
+                      <>
+                        {STATE_LABEL[t.state]}
+                        {t.plan && t.state === "planned" && ` · ${t.plan.steps.length} steps`}
+                      </>
+                    )}
                   </span>
                 </button>
               </li>

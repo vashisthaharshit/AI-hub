@@ -169,7 +169,11 @@ flowchart LR
     T -- vague --> Q["1–2 questions"] --> P
     T -- big --> P["📋 Plan<br/>2–5 steps"]
     P --> RT["🧭 Router<br/>agent + model + effort per step"]
-    RT --> RUN["▶️ Run<br/>(next)"]
+    RT --> RUN["▶️ Run<br/>steps, parallel where safe"]
+    RUN --> CK{"✅ Check"}
+    CK -- fails --> UP["⬆️ Retry once with<br/>a stronger model"] --> CK
+    CK -- passes --> MG["🔀 Merge + tests<br/>+ review"]
+    MG --> K["👀 You: Keep or Discard"]
 ```
 
 - **Triage** uses simple rules first (free and instant). Only when they aren't sure does it ask the cheapest
@@ -187,6 +191,22 @@ flowchart LR
 
   It avoids agents that are close to their usage limit, spreads parallel steps across Claude Code and Codex, and
   gives the review to a different agent from the one that wrote the code. You can change any choice.
+
+**Running a plan.** Everything happens on a copy (branch `aihub/brain-<task>`); your folder isn't touched.
+Steps that run at the same time each get their own copy and are merged afterwards; if two changed the same lines,
+an agent combines them. A step is checked when it finishes (no error, not blocked, and the tests pass if they passed
+before the plan). A failed check gets **one retry with a stronger model**; after that the Brain asks you: try again,
+skip, or stop. With **Approve each step** it pauses before every step so you can change the brief.
+When everything is done you see all the changes and the test result, then **Keep** (the branch stays; merge it with
+`git merge aihub/brain-<task>`) or **Discard**.
+
+**Project memory.** Agents leave short notes (decisions, gotchas, where things are). Later steps get the relevant
+notes in their brief, and can call tools to **find code** (where a function is defined and used, worked out by code)
+or **search notes**, instead of exploring the repo again. Notes from kept tasks stay for future tasks, marked
+"maybe outdated" when their files change. See and delete them in **Workspace settings**.
+
+**Learning.** Every step's result is saved. When a smaller model reliably passes a kind of step, the router uses
+it (cheaper); when a model keeps failing one, it picks a bigger one. See it in **Settings → Brain: what it learned**.
 
 Runs started by a Brain task stay in Brain; **Move to Manual** brings one over to keep chatting with it there.
 
@@ -286,11 +306,13 @@ Adding an agent = one adapter file in [`backend/aihub/agents/`](backend/aihub/ag
 - [x] **Workspaces and a new interface.** One workspace per product
 - [x] **Brain: plan.** Triage, clarifying questions, a checked and editable plan
 - [x] **Brain: router.** Agent, model and effort per step (Cheapest / Balanced / Best)
-- [ ] **Brain: run the plan.** Steps one after another, with briefs, checks and "approve each step"
-- [ ] **Brain: parallel steps.** Separate worktrees, merge, a review step, then Keep or Discard
-- [ ] **Brain: step up on failure.** Retry a failed step once with a stronger model
-- [ ] **Project memory.** Agents look things up instead of re-exploring the repo, with fewer tokens
-- [ ] **Learning from history.** The router learns which choices work for your projects
+- [x] **Brain: run the plan.** Steps one after another, with briefs, checks and "approve each step"
+- [x] **Brain: parallel steps.** Separate worktrees, merge (conflicts fixed by an agent), a review step, then Keep or Discard
+- [x] **Brain: step up on failure.** A failed step is retried once with a stronger model, then you decide
+- [x] **Project memory.** Agents look things up (notes, where code lives) instead of re-exploring the repo
+- [x] **Learning from history.** The router learns which model sizes pass which kinds of steps
+- [ ] **More agents.** Antigravity CLI
+- [ ] **One-click installer.** No cloning or terminal needed
 
 ## 🧑‍💻 Development
 

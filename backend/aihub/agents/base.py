@@ -28,6 +28,9 @@ class RunOptions:
     extra_env: dict[str, str] | None = None   # the app's settings + keys, for the agent's process
     plugin_dirs: list[str] | None = None      # Claude Code plugins to load for this run only
     accept_edits: bool = False                # with approvals: file edits don't ask, other actions do
+    # Brain steps: what the project-memory tool server needs to reach AI-Hub
+    # (URL + a secret token). None = no memory tools for this turn.
+    memory_env: dict[str, str] | None = None
 
 
 class AgentAdapter(ABC):

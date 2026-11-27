@@ -20,6 +20,7 @@ Follow-ups:  codex exec ... resume <session_id> -
 """
 
 import json
+import sys
 import shutil
 import tempfile
 import time
@@ -91,6 +92,8 @@ class CodexAdapter(AgentAdapter):
         if options.effort:
             # Config override: same as model_reasoning_effort in ~/.codex/config.toml
             cmd += ["-c", f"model_reasoning_effort={options.effort}"]
+        if options.memory_env:
+            cmd += memory_server_args(options.memory_env)
         if options.resume_session_id:
             cmd += ["resume", options.resume_session_id]
         cmd.append("-")  # read the prompt from stdin
@@ -116,6 +119,23 @@ class CodexAdapter(AgentAdapter):
                     yield event
         except ProcessFailed as exc:
             yield AgentEvent(kind="error", data={"message": str(exc), "exit_code": exc.exit_code})
+
+
+def memory_server_args(env: dict[str, str]) -> list[str]:
+    """Brain steps: add AI-Hub's project memory tools (brain/memory_mcp.py) as an
+    MCP server, with -c overrides (same as [mcp_servers.aihub_memory] in
+    ~/.codex/config.toml). Values are TOML; '...' strings need no escaping,
+    which matters for Windows paths."""
+    def literal(text: str) -> str:
+        return "'" + text.replace("'", "") + "'"
+    table = ",".join(f"{key}={literal(value)}" for key, value in env.items())
+    return [
+        "-c", f"mcp_servers.aihub_memory.command={literal(sys.executable)}",
+        "-c", 'mcp_servers.aihub_memory.args=["-m","aihub.brain.memory_mcp"]',
+        "-c", f"mcp_servers.aihub_memory.env={{{table}}}",
+        # Without this, `codex exec` can't ask and blocks the tools ("approval policy").
+        "-c", "mcp_servers.aihub_memory.default_tools_approval_mode='approve'",
+    ]
 
 
 # ---------- discovery: models + account (codex app-server) ----------

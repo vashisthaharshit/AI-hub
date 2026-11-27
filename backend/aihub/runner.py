@@ -90,6 +90,7 @@ class RunManager:
         self._next_seq: dict[str, int] = {}
         self._tokens: dict[str, str] = {}  # run_id -> secret for the approval bridge
         self._approvals: dict[str, _PendingApproval] = {}
+        self._memory_env: dict[str, dict[str, str]] = {}  # step runs: env for the memory tool server
 
     # ---------- starting, continuing, stopping ----------
 
@@ -135,6 +136,36 @@ class RunManager:
             supervised=adapter.supports_supervised, model=model or None, effort=effort or None,
         ))
         self._launch(run_id, adapter, prompt, Path(app_path), resume=None, model=model or None, effort=effort or None)
+        return self.db.get_run(run_id)
+
+    async def start_step(self, *, workspace_id: str | None, brain_task_id: str, repo_path: str, folder: Path,
+                         base_commit: str, adapter: AgentAdapter, prompt: str, label: str,
+                         model: str | None, effort: str | None, test_command: str | None,
+                         memory_env: dict[str, str] | None = None) -> RunInfo:
+        """One step of a Brain plan, run in a folder the Brain manages (the task's
+        worktree, or a parallel step's own worktree). Checks after the turn
+        compare with `base_commit` (where the step started)."""
+        run_id = uuid4().hex[:12]
+        self.db.insert_run(RunInfo(
+            id=run_id, agent_id=adapter.id, repo_path=repo_path, prompt=prompt, state="running",
+            created_at=now_iso(), worktree_path=str(folder), base_commit=base_commit, kind="step",
+            label=label, model=model or None, effort=effort or None, test_command=test_command,
+            workspace_id=workspace_id, origin="brain", brain_task_id=brain_task_id,
+        ))
+        if memory_env:
+            self._memory_env[run_id] = memory_env
+        self._launch(run_id, adapter, prompt, folder, resume=None, model=model or None, effort=effort or None)
+        return self.db.get_run(run_id)
+
+    def end_step(self, run_id: str) -> None:
+        """The Brain is done with this step run: no more memory tools for it."""
+        self._memory_env.pop(run_id, None)
+
+    async def wait(self, run_id: str) -> RunInfo:
+        """Wait until the run's current turn is over (whatever its result)."""
+        task = self._tasks.get(run_id)
+        if task:
+            await asyncio.wait({task})   # doesn't raise if the turn was cancelled
         return self.db.get_run(run_id)
 
     async def follow_up(self, run_id: str, prompt: str, model: str | None = None,
@@ -258,6 +289,8 @@ class RunManager:
             options.plugin_dirs = ctx.plugin_dirs
             options.accept_edits = True
             before = await asyncio.to_thread(running.snapshot, path)
+        if run.kind == "step" and run_id in self._memory_env:
+            options.memory_env = self._memory_env[run_id]
         if run.supervised:
             token = secrets.token_urlsafe(24)
             self._tokens[run_id] = token
@@ -397,6 +430,8 @@ class RunManager:
             return await worktree.changed_files(Path(run.repo_path), base, run.branch)
         if run.outcome == "discarded" or not run.worktree_path:
             return []
+        if run.kind == "step" and not Path(run.worktree_path).exists():
+            return []  # the Brain task was kept or discarded: see the task's changes instead
         return await worktree.changed_files(Path(run.worktree_path), base)
 
     async def keep(self, run_id: str) -> RunInfo:
@@ -431,8 +466,9 @@ class RunManager:
         if self.is_active(run_id):
             raise RunError("The run is still working. Cancel it first.")
         repo = Path(run.repo_path)
-        if run.kind == "app":
-            # Only the history goes. The app's folder is the user's: never touched.
+        if run.kind in ("app", "step"):
+            # Only the history goes. The app's folder is the user's, and a
+            # step's folder belongs to its Brain task: never touched here.
             self.db.delete_run(run_id)
             self._next_seq.pop(run_id, None)
             return
@@ -463,6 +499,8 @@ class RunManager:
     def _no_git_for_apps(run: RunInfo) -> None:
         if run.kind == "app":
             raise RunError("App runs work directly in the app's folder; there is nothing to keep or discard.")
+        if run.kind == "step":
+            raise RunError("This run is one step of a Brain task. Keep or discard the whole task in Brain.")
 
     def _require_run(self, run_id: str) -> RunInfo:
         run = self.db.get_run(run_id)

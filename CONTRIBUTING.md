@@ -59,8 +59,12 @@ AI-hub/
 │   │   │   ├── triage.py         small or big? rules first, a tiny AI check only when unsure
 │   │   │   ├── digest.py         a short repo description for the planner, made by code
 │   │   │   ├── planner.py        questions or a plan; checked and fixed by code
-│   │   │   ├── router.py         agent + model + effort per step (Cheapest / Balanced / Best)
-│   │   │   └── tasks.py          Brain tasks: triage -> questions -> plan -> edits
+│   │   │   ├── router.py         agent + model + effort per step (Cheapest / Balanced / Best), step-ups
+│   │   │   ├── tasks.py          Brain tasks: triage -> questions -> plan -> edits
+│   │   │   ├── executor.py       runs a plan: worktrees, checks, parallel merge, retries, approvals, keep/discard
+│   │   │   ├── memory.py         project memory: notes (with staleness) + code facts (where code is defined/used)
+│   │   │   ├── memory_mcp.py     the memory tools agents call during a step (MCP over stdin/stdout)
+│   │   │   └── learning.py       step results -> which model sizes the router picks
 │   │   └── apps/                 GitHub repos made for agents, used through buttons
 │   │       ├── connect.py        clone or reuse a repo (push disabled for safety)
 │   │       ├── manifest.py       read commands, skills, plugins, requirements (no AI)

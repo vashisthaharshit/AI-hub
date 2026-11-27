@@ -13,6 +13,7 @@ import { agentColor, tint } from "../../lib/theme";
 import { StatusBadge } from "../StatusBadge";
 import { ModelPicker } from "../ModelSelect";
 import { MODES } from "./BrainNewTask";
+import { ExecutionPanel } from "./ExecutionPanel";
 
 const TYPES: StepType[] = ["explore", "build", "test", "fix", "review"];
 const DIFFICULTIES: Difficulty[] = ["easy", "medium", "hard"];
@@ -58,6 +59,16 @@ export function BrainTaskView({ taskId, workspace, agents, onChanged, onDeleted,
     setDirect(t.direct);
   }
 
+  // While the plan runs, follow it (step states, what it needs from you).
+  const execState = task?.execution?.state;
+  useEffect(() => {
+    if (execState !== "running" && execState !== "waiting") return;
+    const timer = setInterval(() => {
+      api.brainTask(taskId).then((t) => setTask(t)).catch(() => {});
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [taskId, execState]);
+
   useEffect(() => {
     api.brainTask(taskId).then(show).catch((e) => setError(errorText(e)));
   }, [taskId]);
@@ -80,6 +91,8 @@ export function BrainTaskView({ taskId, workspace, agents, onChanged, onDeleted,
 
   if (!task) return <p className="p-10 text-sm text-zinc-500">{error ?? "Loading task..."}</p>;
   const plan = task.plan;
+  // A plan that has started (and wasn't discarded) is shown live instead of editable.
+  const executing = Boolean(task.execution && task.execution.state !== "discarded");
   const titleOf = (id: string) => steps.find((s) => s.id === id)?.title || id;
 
   function change(id: string, patch: Partial<PlanStep>) {
@@ -173,7 +186,7 @@ export function BrainTaskView({ taskId, workspace, agents, onChanged, onDeleted,
                 {busy === "plan" ? <span className="thinking">Planning...</span> : "Plan it instead"}
               </button>
             </>
-          ) : (
+          ) : executing ? null : (
             <button onClick={() => act("direct", () => api.brainDirect(task.id))} disabled={busy !== null} className="workspace-button text-xs">
               Just do it with one agent instead
             </button>
@@ -211,7 +224,19 @@ export function BrainTaskView({ taskId, workspace, agents, onChanged, onDeleted,
       )}
 
       {/* the plan */}
-      {task.state === "planned" && plan && (
+      {task.state === "planned" && plan && executing && (
+        <ExecutionPanel
+          task={task}
+          agents={agents}
+          onUpdate={(t) => {
+            show(t);
+            onChanged();
+          }}
+          onOpenRun={onOpenRun}
+        />
+      )}
+
+      {task.state === "planned" && plan && !executing && (
         <section className="space-y-4">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h3 className="text-base font-semibold">The plan</h3>
@@ -306,11 +331,26 @@ export function BrainTaskView({ taskId, workspace, agents, onChanged, onDeleted,
           </div>
 
           <div className="flex flex-wrap items-center gap-3 border-t border-zinc-800 pt-4">
-            <button disabled className="run-button" title="Coming in the next build step">
-              Run the plan
+            <button
+              onClick={() => act("run", () => api.runBrainTask(task.id))}
+              disabled={busy !== null || dirty || plan.problems.length > 0 || steps.some((s) => !s.assignment)}
+              className="run-button"
+            >
+              {busy === "run" ? "Starting..." : task.execution?.state === "discarded" ? "Run the plan again" : "Run the plan"}
             </button>
-            <span className="text-xs text-zinc-500">Running plans comes in the next build step.</span>
+            <span className="text-xs text-zinc-500">
+              {dirty
+                ? "Save your changes first."
+                : plan.problems.length > 0
+                  ? "Fix the problems above first."
+                  : task.approval === "each"
+                    ? "It will pause before every step so you can check it."
+                    : "Steps run on a copy of your repo. You review everything before keeping it."}
+            </span>
           </div>
+          {task.execution?.state === "discarded" && task.execution.message && (
+            <p className="text-xs text-zinc-500">{task.execution.message}</p>
+          )}
         </section>
       )}
 

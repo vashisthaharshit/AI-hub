@@ -104,7 +104,7 @@ export interface RunInfo {
   result: RunResult | null;
   metrics: RunMetrics | null;
   outcome: RunOutcome | null;
-  kind: "task" | "app"; // app = an app's command, run in the app's own folder
+  kind: "task" | "app" | "step"; // app = an app's command in its folder; step = one step of a Brain task
   app_id: string | null;
   label: string | null; // what the user clicked, e.g. "Check and apply to a job"
   workspace_id: string | null;
@@ -476,6 +476,7 @@ export interface BrainTask {
   answers: string[];
   plan: BrainPlan | null;
   direct: StepAssignment | null; // small tasks: the one agent + model the router picked
+  execution: BrainExecution | null; // running the plan
   created_at: string;
   updated_at: string;
 }
@@ -509,4 +510,69 @@ export interface Workspace {
   manual_count: number;
   brain_count: number;
   last_activity: string | null;
+}
+
+// ---------- Brain: running a plan (backend brain/executor.py) ----------
+
+export interface StepProgress {
+  step_id: string;
+  state: "waiting" | "running" | "passed" | "failed" | "skipped";
+  run_id: string | null; // open it to watch the agent
+  attempts: number;
+  stepped_up: boolean; // retried with a stronger model
+  agent_id: string | null;
+  model: string | null;
+  effort: string | null;
+  message: string | null; // what went wrong, or the agent's summary
+  branch: string | null;
+  worktree_path: string | null;
+  merged: boolean;
+}
+
+export type ExecutionState = "running" | "waiting" | "done" | "stopped" | "failed" | "kept" | "discarded";
+
+export interface BrainExecution {
+  state: ExecutionState;
+  wave: number;
+  steps: Record<string, StepProgress>;
+  branch: string | null;
+  worktree_path: string | null;
+  base_commit: string | null;
+  baseline_tests: boolean | null;
+  final_tests: boolean | null;
+  final_test_output: string | null;
+  waiting_for: "approve" | "failure" | "conflict" | null;
+  waiting_steps: string[];
+  message: string | null;
+  fixup_runs: string[];
+  log: { at: string; text: string }[];
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export type BrainAction = "continue" | "retry" | "skip" | "stop";
+
+export interface MemoryNote {
+  id: string;
+  workspace_id: string | null;
+  task_id: string | null;
+  scope: "task" | "repo";
+  text: string;
+  files: string[];
+  stale_files: string[]; // changed since the note was written
+  created_at: string;
+}
+
+export interface StepStat {
+  step_type: string;
+  difficulty: string;
+  tier: string;
+  passed: number;
+  total: number;
+}
+
+export interface BrainLearning {
+  stats: StepStat[];
+  adjustments: string[];
+  triage_overrides: Record<string, number>;
 }

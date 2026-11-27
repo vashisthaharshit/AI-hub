@@ -86,6 +86,38 @@ CREATE TABLE IF NOT EXISTS workspaces (
     updated_at   TEXT NOT NULL
 );
 
+-- Project memory: notes agents leave for later steps and future tasks.
+-- files_json: [{"path": ..., "hash": ...}] (hash of the file when the note was written)
+CREATE TABLE IF NOT EXISTS memory_notes (
+    id           TEXT PRIMARY KEY,
+    workspace_id TEXT,
+    task_id      TEXT,
+    scope        TEXT NOT NULL,      -- task | repo
+    text         TEXT NOT NULL,
+    files_json   TEXT NOT NULL,
+    created_at   TEXT NOT NULL
+);
+
+-- Learning: one row per attempt at a Brain step (who did it, did it pass).
+CREATE TABLE IF NOT EXISTS step_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id  TEXT,
+    task_id       TEXT,
+    step_type     TEXT NOT NULL,
+    difficulty    TEXT NOT NULL,
+    agent_id      TEXT NOT NULL,
+    model         TEXT,
+    tier          TEXT NOT NULL,
+    mode          TEXT NOT NULL,
+    passed        INTEGER NOT NULL,
+    attempt       INTEGER NOT NULL,
+    input_tokens  INTEGER,
+    output_tokens INTEGER,
+    cost_usd      REAL,
+    duration_ms   INTEGER,
+    created_at    TEXT NOT NULL
+);
+
 -- Brain tasks (Phase 3): the request, triage, questions and the plan, as JSON.
 CREATE TABLE IF NOT EXISTS brain_tasks (
     id         TEXT PRIMARY KEY,
@@ -333,6 +365,60 @@ class Database:
     def delete_brain_task(self, task_id: str) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM brain_tasks WHERE id = ?", (task_id,))
+
+    # ---------- project memory ----------
+
+    def add_note(self, note_id: str, workspace_id: str | None, task_id: str | None, scope: str, text: str,
+                 files: list[dict]) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO memory_notes (id, workspace_id, task_id, scope, text, files_json, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (note_id, workspace_id, task_id, scope, text, json.dumps(files), now_iso()),
+            )
+
+    def notes(self, workspace_id: str | None = None, task_id: str | None = None,
+              scope: str | None = None) -> list[dict]:
+        """Raw rows (files as [{"path","hash"}]); brain/memory.py adds staleness."""
+        where, args = [], []
+        for column, value in (("workspace_id", workspace_id), ("task_id", task_id), ("scope", scope)):
+            if value:
+                where.append(f"{column} = ?")
+                args.append(value)
+        sql = "SELECT * FROM memory_notes" + (f" WHERE {' AND '.join(where)}" if where else "")
+        rows = self.conn.execute(sql + " ORDER BY created_at DESC", args).fetchall()
+        return [{**dict(r), "files": json.loads(r["files_json"])} for r in rows]
+
+    def update_note(self, note_id: str, scope: str, files: list[dict]) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE memory_notes SET scope = ?, files_json = ? WHERE id = ?",
+                              (scope, json.dumps(files), note_id))
+
+    def delete_notes(self, task_id: str | None = None, note_id: str | None = None, scope: str | None = None) -> int:
+        where, args = [], []
+        for column, value in (("task_id", task_id), ("id", note_id), ("scope", scope)):
+            if value:
+                where.append(f"{column} = ?")
+                args.append(value)
+        if not where:
+            return 0
+        with self.conn:
+            return self.conn.execute(f"DELETE FROM memory_notes WHERE {' AND '.join(where)}", args).rowcount
+
+    # ---------- learning ----------
+
+    def log_step(self, **row) -> None:
+        columns = ", ".join(row)
+        marks = ", ".join("?" for _ in row)
+        with self.conn:
+            self.conn.execute(f"INSERT INTO step_log ({columns}, created_at) VALUES ({marks}, ?)",
+                              (*row.values(), now_iso()))
+
+    def step_stats(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT step_type, difficulty, tier, SUM(passed) AS passed, COUNT(*) AS total FROM step_log"
+            " GROUP BY step_type, difficulty, tier ORDER BY step_type, difficulty, tier").fetchall()
+        return [dict(r) for r in rows]
 
     def get_setting(self, key: str, default=None):
         row = self.conn.execute("SELECT value_json FROM settings WHERE key = ?", (key,)).fetchone()

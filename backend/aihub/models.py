@@ -237,7 +237,9 @@ class RunInfo(BaseModel):
     outcome: RunOutcome | None = None   # set once the user keeps or discards the work
     # "task" = Manual mode (own worktree). "app" = a connected app's command,
     # run IN the app's folder (its data must stay in one place): no keep/discard.
-    kind: Literal["task", "app"] = "task"
+    # "step" = one step of a Brain plan, run in a worktree the Brain manages
+    # (kept or discarded with the whole Brain task, not on its own).
+    kind: Literal["task", "app", "step"] = "task"
     app_id: str | None = None
     label: str | None = None            # app runs: what the user clicked, e.g. "Check and apply to a job"
     workspace_id: str | None = None     # the workspace (one repo) this chat belongs to
@@ -603,6 +605,7 @@ class BrainTask(BaseModel):
     answers: list[str] = Field(default_factory=list)
     plan: BrainPlan | None = None
     direct: StepAssignment | None = None       # small tasks: the one agent + model the router picked
+    execution: "BrainExecution | None" = None  # running the plan (brain/executor.py)
     created_at: str
     updated_at: str
 
@@ -660,3 +663,90 @@ class WorkspaceEdit(BaseModel):
     name: str | None = None
     test_command: str | None = None
     color: str | None = None
+
+
+# ---------- Brain: running a plan (brain/executor.py) ----------
+
+class StepProgress(BaseModel):
+    """How one step of a plan is going."""
+
+    step_id: str
+    state: Literal["waiting", "running", "passed", "failed", "skipped"] = "waiting"
+    run_id: str | None = None          # the step's run (open it to watch the agent)
+    attempts: int = 0
+    stepped_up: bool = False           # retried with a stronger model
+    agent_id: str | None = None        # who actually did it (after a step-up)
+    model: str | None = None
+    effort: str | None = None
+    message: str | None = None         # what went wrong, or the agent's short summary
+    branch: str | None = None          # parallel steps get their own branch + worktree
+    worktree_path: str | None = None
+    merged: bool = False               # a parallel step's work is in the task branch
+
+
+class ExecutionLogEntry(BaseModel):
+    at: str
+    text: str
+
+
+class BrainExecution(BaseModel):
+    # running   steps are being worked on
+    # waiting   AI-Hub needs the user (approve the next steps, a failure, a merge conflict)
+    # done      everything finished: review the changes, then Keep or Discard
+    # stopped   stopped by the user, or AI-Hub was closed; can continue from where it stopped
+    # failed    something AI-Hub couldn't handle (shown in message)
+    state: Literal["running", "waiting", "done", "stopped", "failed", "kept", "discarded"] = "running"
+    wave: int = 0                                   # index into plan.waves
+    steps: dict[str, StepProgress] = Field(default_factory=dict)
+    branch: str | None = None                       # aihub/brain-<task id>
+    worktree_path: str | None = None
+    base_commit: str | None = None
+    baseline_tests: bool | None = None              # did the tests pass before any step? (None = no test command)
+    final_tests: bool | None = None
+    final_test_output: str | None = None
+    waiting_for: Literal["approve", "failure", "conflict"] | None = None
+    waiting_steps: list[str] = Field(default_factory=list)
+    message: str | None = None                      # what's happening, or what's needed, in plain words
+    fixup_runs: list[str] = Field(default_factory=list)  # merge / test fix-ups
+    log: list[ExecutionLogEntry] = Field(default_factory=list)
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class BrainAnswer(BaseModel):
+    """The user's answer when a running plan waits for them."""
+
+    action: Literal["continue", "retry", "skip", "stop"]
+    briefs: dict[str, str] = Field(default_factory=dict)   # edited briefs for the next steps (approve)
+
+
+class MemoryNote(BaseModel):
+    """Something an agent learned about the repo (brain/memory.py)."""
+
+    id: str
+    workspace_id: str | None = None
+    task_id: str | None = None
+    scope: Literal["task", "repo"]           # task notes become repo notes when the task is kept
+    text: str
+    files: list[str] = Field(default_factory=list)
+    stale_files: list[str] = Field(default_factory=list)   # changed since the note was written
+    created_at: str
+
+
+class StepStat(BaseModel):
+    """How a kind of step went with a model size (brain/learning.py)."""
+
+    step_type: str
+    difficulty: str
+    tier: str
+    passed: int
+    total: int
+
+
+class BrainLearning(BaseModel):
+    stats: list[StepStat] = Field(default_factory=list)
+    adjustments: list[str] = Field(default_factory=list)     # what the router now does differently
+    triage_overrides: dict[str, int] = Field(default_factory=dict)
+
+
+BrainTask.model_rebuild()

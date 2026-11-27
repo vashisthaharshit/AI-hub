@@ -115,7 +115,14 @@ export function RunView({ runId, agents, onChanged, onDeleted }: Props) {
                 Cancel
               </button>
             )}
-            {idle && <KeepDiscard onKeep={() => act(() => api.keep(runId))} onDiscard={() => act(() => api.discard(runId))} />}
+            {idle && run?.kind !== "step" && (
+              <KeepDiscard onKeep={() => act(() => api.keep(runId))} onDiscard={() => act(() => api.discard(runId))} />
+            )}
+            {run?.kind === "step" && (
+              <span className="self-center text-xs text-zinc-500" title="Keep or discard the whole task in Brain">
+                Step of a Brain task
+              </span>
+            )}
             {run && !isRunning && (
               <DeleteButton
                 kept={run.outcome === "kept"}

@@ -3,7 +3,7 @@
 // in dev, Vite's proxy forwards them; in production, the backend serves the UI.
 
 import type {
-  AgentStatus, AppConnect, BrainCreate, BrainMode, BrainSettings, BrainTask, PlanStep, AppGuide, AppInfo, AppRunCreate, AppUpdateCheck, AppUpdateResult, SetupView, AppRequirement, ChangedFile, InstallJob, RunCreate, RunInfo, SettingsView,
+  AgentStatus, AppConnect, BrainAction, BrainCreate, BrainLearning, BrainMode, BrainSettings, BrainTask, MemoryNote, PlanStep, AppGuide, AppInfo, AppRunCreate, AppUpdateCheck, AppUpdateResult, SetupView, AppRequirement, ChangedFile, InstallJob, RunCreate, RunInfo, SettingsView,
   SummarySettings, SummaryTest, Workspace,
 } from "./types";
 
@@ -103,6 +103,19 @@ export const api = {
   brainSettings: () => request<BrainSettings>("/api/settings/brain"),
   saveBrainSettings: (body: BrainSettings) =>
     request<BrainSettings>("/api/settings/brain", { method: "PUT", body: JSON.stringify(body) }),
+  // Running a plan
+  runBrainTask: (id: string) => request<BrainTask>(`/api/brain/tasks/${id}/run`, { method: "POST" }),
+  answerBrainTask: (id: string, action: BrainAction, briefs: Record<string, string> = {}) =>
+    request<BrainTask>(`/api/brain/tasks/${id}/answer`, { method: "POST", body: JSON.stringify({ action, briefs }) }),
+  stopBrainTask: (id: string) => request<BrainTask>(`/api/brain/tasks/${id}/stop`, { method: "POST" }),
+  keepBrainTask: (id: string) => request<BrainTask>(`/api/brain/tasks/${id}/keep`, { method: "POST" }),
+  discardBrainTask: (id: string) => request<BrainTask>(`/api/brain/tasks/${id}/discard`, { method: "POST" }),
+  brainTaskFiles: (id: string) => request<ChangedFile[]>(`/api/brain/tasks/${id}/files`),
+  brainTaskNotes: (id: string) => request<MemoryNote[]>(`/api/brain/tasks/${id}/notes`),
+  brainLearning: () => request<BrainLearning>("/api/brain/learning"),
+  workspaceNotes: (id: string) => request<MemoryNote[]>(`/api/workspaces/${id}/notes`),
+  deleteWorkspaceNote: (wsId: string, noteId: string) =>
+    request<{ deleted: boolean }>(`/api/workspaces/${wsId}/notes/${noteId}`, { method: "DELETE" }),
   brainDirect: (id: string) => request<BrainTask>(`/api/brain/tasks/${id}/direct`, { method: "POST" }),
   deleteBrainTask: (id: string) => request<{ deleted: boolean }>(`/api/brain/tasks/${id}`, { method: "DELETE" }),
 

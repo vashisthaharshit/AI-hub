@@ -17,7 +17,12 @@ const STATUS_LABEL: Record<ChangedFile["status"], { text: string; className: str
   T: { text: "T", className: "text-zinc-400" },
 };
 
-export default function DiffViewer({ runId, reloadKey }: { runId: string; reloadKey: string }) {
+// `load` lets other screens show their changes (a Brain task's whole plan); default: one run's files.
+export default function DiffViewer({ runId, reloadKey, load }: {
+  runId?: string;
+  reloadKey: string;
+  load?: () => Promise<ChangedFile[]>;
+}) {
   const [files, setFiles] = useState<ChangedFile[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -25,8 +30,7 @@ export default function DiffViewer({ runId, reloadKey }: { runId: string; reload
   useEffect(() => {
     let active = true;
     setError(null);
-    api
-      .files(runId)
+    (load ?? (() => api.files(runId ?? "")))()
       .then((list) => {
         if (!active) return;
         setFiles(list);
@@ -36,7 +40,7 @@ export default function DiffViewer({ runId, reloadKey }: { runId: string; reload
     return () => {
       active = false;
     };
-  }, [runId, reloadKey]);
+  }, [runId, reloadKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (error) return <p className="p-6 text-sm text-red-300">{error}</p>;
   if (!files) return <p className="p-6 text-sm text-zinc-500">Loading changes...</p>;

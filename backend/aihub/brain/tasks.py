@@ -16,7 +16,7 @@ from pathlib import Path
 from aihub import workspaces, worktree
 from aihub.agents.registry import AgentRegistry
 from aihub.apps.guide import pick_writer
-from aihub.brain import planner, router, triage
+from aihub.brain import learning, planner, router, triage
 from aihub.brain.digest import repo_digest
 from aihub.db import Database, now_iso
 from aihub.models import (
@@ -60,10 +60,10 @@ class Brain:
             difficulty = "medium" if task.triage.how == "user" else "easy"
             step = PlanStep(id="task", title="The whole task", type="build", difficulty=difficulty,
                             brief=task.request, done_when="The task is done.")
-            router.route(BrainPlan(steps=[step], waves=[["task"]]), agents, task.mode)
+            router.route(BrainPlan(steps=[step], waves=[["task"]]), agents, task.mode, learning.load(self.db))
             task.direct = step.assignment
         elif task.plan:
-            task.plan.routing_notes = router.route(task.plan, agents, task.mode)
+            task.plan.routing_notes = router.route(task.plan, agents, task.mode, learning.load(self.db))
 
     async def _writer(self):
         settings = await pick_writer(self.summarizer, self.registry, self.db.hidden_models())
@@ -145,10 +145,15 @@ class Brain:
         """Ask the planner (again). With answers: the questions are answered, plan now."""
         async with self._locks.setdefault(task_id, asyncio.Lock()):
             task = self.get(task_id)
+            if task.execution and task.execution.state not in ("kept", "discarded"):
+                raise BrainError("This plan has work in progress. Keep or discard it before writing a new plan.")
+            task.execution = None
             if req.answers:
                 task.answers = [a.strip() for a in req.answers]
             final = bool(task.questions) and (bool(req.answers) or req.skip_questions)
             if task.triage.size == "small":
+                if task.triage.how != "user":
+                    learning.count_override(self.db, "small_to_plan")
                 task.triage = TriageResult(size="big", how="user", reasons=["you chose to plan it"])
             digest = await asyncio.to_thread(repo_digest, Path(task.repo_path))
 
@@ -181,6 +186,8 @@ class Brain:
 
     async def edit(self, task_id: str, req: BrainTaskEdit) -> BrainTask:
         task = self.get(task_id)
+        if task.execution and task.execution.state in ("running", "waiting") and req.steps is not None:
+            raise BrainError("The plan is running. Stop it before changing its steps.")
         if req.mode:
             task.mode = req.mode
         if req.approval:
@@ -198,6 +205,10 @@ class Brain:
 
     async def run_directly(self, task_id: str) -> BrainTask:
         task = self.get(task_id)
+        if task.execution and task.execution.state not in ("discarded",):
+            raise BrainError("This plan has already started. Stop or discard it first.")
+        if task.triage.size == "big" and task.triage.how != "user":
+            learning.count_override(self.db, "big_to_direct")
         task.state, task.plan = "direct", None
         task.triage = TriageResult(size="small", how="user", reasons=["you chose to run it directly"])
         await self.route(task)

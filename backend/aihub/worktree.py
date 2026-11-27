@@ -172,8 +172,52 @@ async def commit_all(worktree: Path, message: str) -> bool:
 
 
 async def remove_worktree(repo: Path, worktree: Path) -> None:
-    """Delete the worktree folder (the branch stays)."""
-    await _git("worktree", "remove", "--force", str(worktree), cwd=repo)
+    """Delete the worktree folder (the branch stays).
+
+    On Windows `git worktree remove` can fail with "Directory not empty" when a
+    file is read-only or still open for a moment (a test run, an agent's
+    process, a cache folder). Then: delete the folder ourselves, retrying a
+    few times, and let git forget it.
+    """
+    try:
+        await _git("worktree", "remove", "--force", str(worktree), cwd=repo)
+        return
+    except GitError as exc:
+        first_error = exc
+    gone = await asyncio.to_thread(_delete_folder, worktree)
+    try:
+        await _git("worktree", "prune", cwd=repo)
+    except GitError:
+        pass
+    if not gone:
+        raise GitError(f"Couldn't delete the folder {worktree} (a program may still be using a file in it). "
+                       f"You can delete it by hand later. ({first_error})")
+
+
+def _delete_folder(path: Path, attempts: int = 6) -> bool:
+    import os
+    import shutil
+    import stat
+    import time
+
+    def make_writable(func, target, _exc_info):
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+        except OSError:
+            pass
+
+    for attempt in range(attempts):
+        if not path.exists():
+            return True
+        try:
+            shutil.rmtree(path, onerror=make_writable)
+        except OSError:
+            pass
+        if not path.exists():
+            return True
+        time.sleep(0.4 * (attempt + 1))
+    return not path.exists()
 
 
 async def delete_branch(repo: Path, branch: str) -> None:

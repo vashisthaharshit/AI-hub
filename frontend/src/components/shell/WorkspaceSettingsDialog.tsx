@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from "react";
 import { api, errorText } from "../../api/client";
-import type { Workspace, WorkspaceColor } from "../../api/types";
+import type { MemoryNote, Workspace, WorkspaceColor } from "../../api/types";
 import { WORKSPACE_COLORS } from "../../lib/theme";
 
 interface Props {
@@ -20,6 +20,20 @@ export function WorkspaceSettingsDialog({ workspace, onClose, onSaved, onDeleted
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notes, setNotes] = useState<MemoryNote[] | null>(null);
+
+  useEffect(() => {
+    api.workspaceNotes(workspace.id).then(setNotes).catch(() => setNotes([]));
+  }, [workspace.id]);
+
+  async function forget(noteId: string) {
+    try {
+      await api.deleteWorkspaceNote(workspace.id, noteId);
+      setNotes((list) => (list ?? []).filter((n) => n.id !== noteId));
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -85,6 +99,30 @@ export function WorkspaceSettingsDialog({ workspace, onClose, onSaved, onDeleted
               ))}
             </div>
           </fieldset>
+          <div className="space-y-2">
+            <p className="text-sm font-medium">Project memory</p>
+            <p className="text-xs text-zinc-500">
+              What agents learned about this repo in Brain tasks you kept. New steps get the relevant notes, so they explore less.
+            </p>
+            {notes === null ? null : notes.length === 0 ? (
+              <p className="text-xs text-zinc-500">Nothing yet.</p>
+            ) : (
+              <ul className="max-h-48 space-y-1.5 overflow-y-auto pr-1">
+                {notes.map((n) => (
+                  <li key={n.id} className="flex items-start gap-2 rounded-lg bg-zinc-950 px-3 py-2 text-xs">
+                    <span className="min-w-0 flex-1">
+                      {n.text}
+                      {n.stale_files.length > 0 && (
+                        <span className="mt-0.5 block text-amber-300/90">Maybe outdated: {n.stale_files.join(", ")} changed since.</span>
+                      )}
+                    </span>
+                    <button type="button" onClick={() => forget(n.id)} className="text-zinc-500 hover:text-red-300" title="Forget this note">✕</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
           {error && <p role="alert" className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</p>}
         </div>
         <div className="flex flex-wrap items-center gap-2 border-t border-zinc-800 px-6 py-4">
