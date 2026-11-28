@@ -68,7 +68,7 @@ class Brain:
     async def _writer(self):
         settings = await pick_writer(self.summarizer, self.registry, self.db.hidden_models())
         if settings is None:
-            raise BrainError("No AI is available to plan. Sign in to Claude Code or Codex, "
+            raise BrainError("No AI is available to plan. Sign in to Claude Code, Codex or Antigravity, "
                              "or set a summary model in Settings.")
         return settings
 

@@ -158,3 +158,14 @@ def test_real_claude_models_newest_and_top_only_when_wanted():
     up = router.step_up(StepAssignment(agent_id="a", agent_name="A", model="sonnet", model_label="", reason="",
                                        manual=False), [AgentStatus(id="a", name="A", state="ready", models=REAL_CLAUDE)])
     assert up.model == "opus"
+
+
+def test_gemini_sizes_from_antigravity_names():
+    """Antigravity's Gemini names: Flash < Hydrogen < Argon < Carbon (the real ids from `agy models`)."""
+    def size(model_id, label):
+        return router.size_of(ModelOption(id=model_id, label=label))
+    assert size("gemini-3.8-flash", "Gemini 3.8 Flash") == 0
+    assert size("gemini-4-hydrogen", "Gemini 4 Hydrogen") == 1
+    assert size("gemini-4-argon", "Gemini 4 Argon") == 2
+    assert size("gemini-4-carbon", "Gemini 4 Carbon") == 3
+    assert size("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)") == 2

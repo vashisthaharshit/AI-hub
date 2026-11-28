@@ -1,7 +1,7 @@
 """A short description of a repo for the planner, made by code (no AI, no tokens).
 
 The planner is a cheap model; it shouldn't explore the repo itself (that's
-what Claude Code and Codex are good at, and paying twice wastes tokens). So
+what the coding agents are good at, and paying twice wastes tokens). So
 it gets this digest instead:
 
   - the files Git knows about (respects .gitignore), grouped by folder

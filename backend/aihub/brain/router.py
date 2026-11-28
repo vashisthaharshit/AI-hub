@@ -38,13 +38,14 @@ TIERS = ("small", "medium", "strong")
 
 # How big a model is: from its name first, then its description. Agents don't
 # say "small / large": Claude names its sizes (Haiku < Sonnet < Opus < Fable),
+# Gemini (Antigravity) names them too (Flash < Hydrogen < Argon < Carbon),
 # Codex describes them ("fast and affordable ... easier tasks", "most capable
 # ... complex coding"). Sizes: 0 small, 1 medium, 2 strong, 3 top (the very
 # biggest: only for Best mode's hard steps and step-ups).
 NAME_SIZES = (
-    (3, ("fable",)),
-    (2, ("opus", "-max", " max", "-pro", " pro", "ultra")),
-    (1, ("sonnet",)),
+    (3, ("fable", "carbon")),
+    (2, ("opus", "-max", " max", "-pro", " pro", "ultra", "argon")),
+    (1, ("sonnet", "hydrogen")),
     (0, ("haiku", "mini", "nano", "flash", "lite", "small", "spark")),
 )
 DESCRIPTION_SIZES = (
@@ -62,6 +63,8 @@ DIFFICULTY_LEVEL = {"easy": 0, "medium": 1, "hard": 2}
 MODE_LABEL = {"cheapest": "Cheapest", "balanced": "Balanced", "best": "Best"}
 NEAR_LIMIT = 90.0   # % of a usage window: avoid this agent if another one fits
 AT_LIMIT = 98.0     # treat as used up
+# When two agents score the same, prefer them in this order (tiny, never decides a real difference).
+TIE_BREAK = {"claude-code": 0.0, "codex": 0.5, "antigravity": 0.7}
 
 
 def size_of(model: ModelOption) -> int:
@@ -181,7 +184,7 @@ def route(plan: BrainPlan, agents: list[AgentStatus], mode: str, stats: learning
         for s in plan.steps:
             if not (s.assignment and s.assignment.manual):
                 s.assignment = None
-        return ["No agent is ready: install and sign in to Claude Code or Codex, then pick again."]
+        return ["No agent is ready: install and sign in to Claude Code, Codex or Antigravity, then pick again."]
 
     wave_of = {sid: i for i, wave in enumerate(plan.waves) for sid in wave}
     per_wave: dict[int, dict[str, int]] = {}
@@ -213,7 +216,7 @@ def route(plan: BrainPlan, agents: list[AgentStatus], mode: str, stats: learning
             score += 1000.0 if used >= AT_LIMIT else 25.0 if used >= NEAR_LIMIT else used / 25.0
             score += wave_load.get(agent.id, 0) * 3.0     # spread steps that run together
             score += 15.0 * wrote.get(agent.id, 0) / written   # a fresh pair of eyes for the review
-            score += 0.0 if agent.id == "claude-code" else 0.5  # tiny, stable tie-break
+            score += TIE_BREAK.get(agent.id, 0.9)  # tiny, stable tie-break
             options.append((score, agent, model, gap, used, window))
         options.sort(key=lambda o: o[0])
         _, agent, model, gap, used, window = options[0]

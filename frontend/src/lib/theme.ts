@@ -17,6 +17,7 @@ export const WORKSPACE_COLORS: Record<WorkspaceColor, string> = {
 export const AGENT_COLORS: Record<string, string> = {
   "claude-code": "#f2a65a",
   codex: "#58e0c6",
+  antigravity: "#f47fb4",
 };
 
 export const agentColor = (id: string | null | undefined) => AGENT_COLORS[id ?? ""] ?? "#8e9bff";

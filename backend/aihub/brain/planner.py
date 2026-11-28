@@ -29,7 +29,7 @@ MAX_QUESTIONS = 2
 STEP_TYPES = ("explore", "build", "test", "review", "fix")
 DIFFICULTIES = ("easy", "medium", "hard")
 
-INSTRUCTIONS = f"""You plan coding work for a team of AI coding agents (Claude Code, Codex).
+INSTRUCTIONS = f"""You plan coding work for a team of AI coding agents (Claude Code, Codex, Antigravity).
 You get a request and a short description of the repository. Split the work into a few steps
 that different agents can do, some at the same time.
 

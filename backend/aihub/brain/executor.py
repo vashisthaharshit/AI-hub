@@ -89,7 +89,7 @@ class BrainRunner:
             raise BrainError("Fix the plan's problems first (shown in red above the steps).")
         missing = [s.title for s in task.plan.steps if not s.assignment]
         if missing:
-            raise BrainError("No agent is ready for some steps. Sign in to Claude Code or Codex, then click Pick agents again.")
+            raise BrainError("No agent is ready for some steps. Sign in to Claude Code, Codex or Antigravity, then click Pick agents again.")
         ex = task.execution
         if ex is None or ex.state == "discarded":
             ex = BrainExecution(state="running", steps={s.id: StepProgress(step_id=s.id) for s in task.plan.steps},
@@ -668,7 +668,7 @@ class BrainRunner:
         main = Path(task.execution.worktree_path)
         a = router.strongest(await self._agents())
         if not a:
-            raise BrainError("No agent is ready for the fix-up. Sign in to Claude Code or Codex, then click Continue.")
+            raise BrainError("No agent is ready for the fix-up. Sign in to Claude Code, Codex or Antigravity, then click Continue.")
         token = secrets.token_urlsafe(18)
         self._tokens[token] = (task_id, "fixup", str(main))
         try:

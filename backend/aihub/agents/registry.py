@@ -11,6 +11,7 @@ The registry also caches two things, because getting them is slow:
 
 import asyncio
 
+from aihub.agents.antigravity import AntigravityAdapter
 from aihub.agents.base import AgentAdapter
 from aihub.agents.claude_code import ClaudeCodeAdapter
 from aihub.agents.codex import CodexAdapter
@@ -104,4 +105,5 @@ def default_registry() -> AgentRegistry:
     return AgentRegistry([
         ClaudeCodeAdapter(),
         CodexAdapter(),
+        AntigravityAdapter(),
     ])

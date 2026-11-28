@@ -381,7 +381,7 @@ class Guides:
                 return saved
             settings = await pick_writer(self.summarizer, self.registry, self.db.hidden_models())
             if settings is None:
-                raise GuideError("No AI is available to write the guide. Sign in to Claude Code or Codex, "
+                raise GuideError("No AI is available to write the guide. Sign in to Claude Code, Codex or Antigravity, "
                                  "or set a summary model in Settings.")
             try:
                 answer = await self.summarizer.complete(INSTRUCTIONS, text, settings, MAX_ANSWER_TOKENS)
